@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <script>
+     var eventSource = new EventSource("/subscribe");
+     eventSource.addEventListener("Message", function (ev) {
+       console.log(ev.data);
+     }, false);
+    </script>
+  </body>
+</html>
