@@ -7,19 +7,18 @@ where
 import Data.Aeson
 import Data.Default.Class
 import Network.HTTP.Req
-import Data.Text (Text)
+import Types (GameId)
+import qualified Data.Text as T (pack)
 
 couchDomain = "localhost"
 couchPort = 5984
 
-createDatabase :: Text -> IO (Maybe ())
-createDatabase dbname =
+createDatabase :: GameId -> IO (Maybe ())
+createDatabase gameId =
   runReq def $ do
-  -- let body = object [ "db" .= dbname ]
   r <- req PUT
-    (http couchDomain /: dbname)
+    (http couchDomain /: T.pack (show gameId))
     NoReqBody
-    -- (ReqBodyJson body)
     ignoreResponse
     (port couchPort)
   pure $

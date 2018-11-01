@@ -1,8 +1,24 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
-module Types where
+module Types
+  ( AccessLevel(..)
+  , Registration(..)
+  , AuthenticationData(..)
+  , Person(..)
+  , PersonId(..)
+  , Game(..)
+  , GameId(..)
+  , NewGame(..)
+  )
+where
 
-import Data.Text (Text)
+import           Data.Text (Text)
+import qualified Data.Text as T (dropWhile, drop)
+import Data.Text.Lazy as LT (toStrict)
 import Data.Aeson
   ( FromJSON(..)
   , ToJSON(..)
@@ -10,14 +26,52 @@ import Data.Aeson
   , (.:)
   , (.=)
   , object
+  , genericToEncoding
+  , defaultOptions
   )
 import Control.Applicative (empty)
 import Data.Int (Int64)
--- import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.FromField
--- import Data.Time (UTCTime)
--- import GHC.Generics
+import Database.PostgreSQL.Simple.ToField
+import GHC.Generics
+import           Data.UUID.Types (UUID)
+import qualified Data.UUID.Types as UUID (fromText, toText)
+import Web.Scotty (Parsable(..))
+
+
+------------------------------------------------------------
+-- Access Level
+------------------------------------------------------------
+
+data AccessLevel
+  = Player
+  | GameMaster
+  | Owner
+  deriving (Generic, Eq)
+
+instance ToJSON AccessLevel
+
+instance Show AccessLevel where
+  show acl = case acl of
+    Player     -> "Player"
+    GameMaster -> "Game Master"
+    Owner      -> "Owner"
+
+instance FromField AccessLevel where
+  fromField f mdata = case mdata of
+    Just "player"      -> pure Player
+    Just "game_master" -> pure GameMaster
+    Just "owner"       -> pure Owner
+    Just _ -> returnError ConversionFailed f
+              "Unrecognized value for AccessLevel"
+    _ -> returnError UnexpectedNull f "Null value for AccessLevel"
+
+instance ToField AccessLevel where
+  toField acl = case acl of
+    Player     -> Escape "player"
+    GameMaster -> Escape "game_master"
+    Owner      -> Escape "owner"
 
 ------------------------------------------------------------
 -- Registration
@@ -25,7 +79,7 @@ import Database.PostgreSQL.Simple.FromField
 
 data Registration = Registration
   { _registrationUsername :: Text
-  , _registrationEmail :: Text
+  , _registrationEmail    :: Text
   , _registrationPassword :: Text
   } deriving (Show)
 
@@ -33,7 +87,7 @@ instance ToJSON Registration where
   toJSON (Registration username email password)
     = object
       [ "username" .= username
-      , "email" .= email
+      , "email"    .= email
       , "password" .= password
       ]
 
@@ -51,14 +105,14 @@ instance FromJSON Registration where
 ------------------------------------------------------------
 
 data AuthenticationData = AuthenticationData
-  { _authEmail :: Text
+  { _authEmail    :: Text
   , _authPassword :: Text
   } deriving (Show)
 
 instance ToJSON AuthenticationData where
   toJSON (AuthenticationData email password)
     = object
-      [ "email" .= email
+      [ "email"    .= email
       , "password" .= password
       ]
 
@@ -71,59 +125,81 @@ instance FromJSON AuthenticationData where
   parseJSON _ = empty
 
 ------------------------------------------------------------
--- User data
+-- PersonId
 ------------------------------------------------------------
-
-data Person = Person
-  { _personId :: PersonId
-  , _personUsername :: Text
-  } deriving (Show)
-
-instance ToJSON Person where
-  toJSON (Person (PersonId id_) username)
-    = object
-      [ "id" .= id_
-      , "username" .= username
-      ]
-
 
 newtype PersonId = PersonId
   { unPersonId :: Int64
-  }
+  } deriving newtype (FromField, ToField, FromJSON, ToJSON, Parsable)
 
 instance Show PersonId where
   show (PersonId id_) = show id_
-
-instance FromField PersonId where
-  fromField f metadata = PersonId <$> fromField f metadata
 
 instance FromRow PersonId where
   fromRow = PersonId
     <$> field
 
-instance ToJSON PersonId where
-  toJSON (PersonId id_) = toJSON id_
+------------------------------------------------------------
+-- Person
+------------------------------------------------------------
+
+data Person = Person
+  { _personId       :: PersonId
+  , _personUsername :: Text
+  , _personAccess   :: AccessLevel
+  } deriving (Show)
+
+instance ToJSON Person where
+  toJSON (Person (PersonId id_) username access)
+    = object
+      [ "id"       .= id_
+      , "username" .= username
+      , "access"   .= access
+      ]
+
+instance FromRow Person where
+  fromRow = Person
+    <$> field
+    <*> field
+    <*> field
 
 ------------------------------------------------------------
--- Game
+-- GameId
 ------------------------------------------------------------
 
 newtype GameId = GameId
-  { unGameId :: Text
-  } deriving (Show)
-
-instance FromField GameId where
-  fromField f metadata = GameId <$> fromField f metadata
+  { unGameId :: UUID
+  } deriving newtype (FromField, ToField)
 
 instance FromRow GameId where
   fromRow = GameId
     <$> field
 
+instance Parsable GameId where
+  parseParam s =
+    case UUID.fromText (stripPrefix s) of
+      Nothing ->
+        Left "Failed to convert text into uuid."
+      Just uuid ->
+        Right (GameId uuid)
+    where
+      stripPrefix
+        = T.drop 1
+        . T.dropWhile (/= '_')
+        . LT.toStrict
+
 instance ToJSON GameId where
-  toJSON (GameId id_) = toJSON id_
+  toJSON (GameId uuid) = toJSON ("game_" <> (show uuid))
+
+instance Show GameId where
+  show (GameId uuid) = "game_" <> show uuid
+
+------------------------------------------------------------
+-- Game
+------------------------------------------------------------
 
 data Game = Game
-  { _gameId :: GameId
+  { _gameId    :: GameId
   , _gameTitle :: Text
   } deriving (Show)
 
@@ -135,10 +211,13 @@ instance FromRow Game where
 instance ToJSON Game where
   toJSON (Game id_ title)
     = object
-      [ "id" .= id_
+      [ "id"    .= id_
       , "title" .= title
       ]
 
+------------------------------------------------------------
+-- NewGame
+------------------------------------------------------------
 
 data NewGame = NewGame
   { _newGameTitle :: Text

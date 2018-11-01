@@ -14,6 +14,7 @@ import Network.HTTP.Types
   ( unauthorized401
   , Status
   , status200
+  , status400
   , status500
   )
 import Types
@@ -56,6 +57,8 @@ import Network.HTTP.ReverseProxy
   , defaultOnExc
   , ProxyDest(..)
   )
+import qualified Data.UUID.Types as UUID (fromText)
+
 
 main :: IO ()
 main =
@@ -76,16 +79,6 @@ main =
     file "src/event-source.html"
 
 
-  post "/register" $ do
-    reg :: Registration <- jsonData
-    mPersonId <- liftIO $ createPerson conn reg
-    case mPersonId of
-      Nothing ->
-        raise "Error: Email already in use."
-      Just personId ->
-        json personId
-
-
   post "/send" $ do
     msg <- param "msg"
     let event =
@@ -95,6 +88,16 @@ main =
           , eventData = [fromByteString (T.encodeUtf8 msg)]
           }
     liftIO $ writeChan chan event
+
+
+  post "/register" $ do
+    reg :: Registration <- jsonData
+    mPersonId <- liftIO $ createPerson conn reg
+    case mPersonId of
+      Nothing ->
+        raise "Error: Email already in use."
+      Just personId ->
+        json personId
 
 
   post "/login" $ do
@@ -113,44 +116,93 @@ main =
         json personId
 
   get "/games" $ do
-    result <- authenticate redisConn
-    case result of
-      Left err ->
-        status err
-      Right personId -> do
-        games <- liftIO $ getGamesForPersonId conn personId
-        json games
+    checkAuth redisConn $ \personId -> do
+      games <- liftIO $ getGamesForPersonId conn personId
+      json games
 
 
   post "/games" $ do
-    result <- authenticate redisConn
-    case result of
-      Left err ->
-        status err >> text ""
+    checkAuth redisConn $ \personId -> do
+      newGame <- jsonData
 
-      Right personId -> do
-        -- parse the body
-        newGame <- jsonData
+      -- create a game entry in postgres
+      gameId <- liftIO $
+        createGameForPersonId conn
+        personId
+        (_newGameTitle newGame)
 
-        -- create a game entry in postgres
-        gameId <- liftIO $
-          createGameForPersonId conn
-          personId
-          (_newGameTitle newGame)
+      -- create database in couchdb
+      mCouchStatus <- liftIO $
+        CouchDB.createDatabase gameId
+      case mCouchStatus of
+        Nothing ->
+          status status500 >> text ""
+        Just _ ->
+          json gameId
 
-        -- create database in couchdb
-        mCouchStatus <- liftIO $
-          CouchDB.createDatabase (unGameId gameId)
-        case mCouchStatus of
-          Nothing ->
-            status status500 >> text ""
-          Just _ ->
-            json gameId
+
+  get "/games/:gameId/players" $
+    checkAuth redisConn $ \personId -> do
+    gameId <- param "gameId"
+    mAccess <- liftIO $ verifyGameAccess conn personId gameId
+    case mAccess of
+      Nothing ->
+        status unauthorized401 >> text ""
+      Just _ -> do
+        players <- liftIO $ listPeopleInGame conn gameId
+        json players
+
+
+  post "/games/:gameId/players" $
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      playerId <- jsonData
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status unauthorized401 >> text ""
+        Just _ -> do
+          mResult <- liftIO $ addPersonToGame conn playerId gameId
+          case mResult of
+            Nothing ->
+              status status500 >>
+              text "Could not add player to the game"
+            Just _ ->
+              status status200 >>
+              text ""
+
+  delete "/games/:gameId/players/:playerId" $
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      playerId <- param "playerId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status unauthorized401 >> text ""
+        Just _ -> do
+          mResult <- liftIO $
+            removePersonFromGame conn playerId gameId
+          case mResult of
+            Nothing ->
+              status status500 >>
+              text "Could not remove player from the game"
+            Just _ ->
+              status status200 >>
+              text ""
 
 
 ------------------------------------------------------------
 -- Authentication/Authorization
 ------------------------------------------------------------
+
+checkAuth :: Redis.Connection
+          -> (PersonId -> ActionM ())
+          -> ActionM ()
+checkAuth redisConn handler = do
+  result <- authenticate redisConn
+  case result of
+    Left err       -> status err >> text ""
+    Right personId -> handler personId
 
 authenticate :: Redis.Connection -> ActionM (Either Status PersonId)
 authenticate redisConn = do
@@ -232,7 +284,6 @@ subscription :: Chan ServerEvent -> Application -> Application
 subscription chan app req resp =
   case (requestMethod req, pathInfo req) of
     (_, "subscribe":_) ->
-      -- resp $ responseLBS status200 [] "It works."
       eventSourceAppChan chan req resp
     _ -> app req resp
 
@@ -258,4 +309,3 @@ couchProxy manager conn redisConn app req resp =
       putStrLn $ "rawPathInfo: " <> show (rawPathInfo newReq)
       putStrLn $ "pathInfo: " <> show (pathInfo newReq)
       pure $ WPRModifiedRequest newReq $ ProxyDest "127.0.0.1" 5984
-      -- return $ WPRProxyDest $ ProxyDest "127.0.0.1" 5984
