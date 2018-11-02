@@ -128,16 +128,16 @@ removePersonFromGame conn personId gameId = do
 verifyGameAccess :: Connection
                  -> PersonId
                  -> GameId
-                 -> IO (Maybe Bool)
+                 -> IO (Maybe AccessLevel)
 verifyGameAccess conn personId gameId = do
   result <- query conn sql (personId, gameId)
   pure $
     case result of
       []           -> Nothing
-      (Only bool):_ -> Just bool
+      (Only acl):_ -> Just acl
   where
     sql =
-      "SELECT true \
+      "SELECT access \
       \  FROM person_game_relation \
       \  WHERE person_id = ? \
       \  AND game_id = ?;"

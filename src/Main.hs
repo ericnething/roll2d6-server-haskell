@@ -3,13 +3,13 @@
 
 module Main where
 
-import Web.Scotty
 import Data.Monoid (mconcat, (<>))
+import Control.Monad.IO.Class (liftIO)
+import Control.Concurrent.Chan (Chan, newChan, writeChan)
+
+import Network.Wai
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
-import Network.Wai.EventSource
-  ( ServerEvent(..)
-  , eventSourceAppChan
-  )
+import Network.Wai.EventSource (ServerEvent(..), eventSourceAppChan)
 import Network.HTTP.Types
   ( unauthorized401
   , Status
@@ -17,35 +17,6 @@ import Network.HTTP.Types
   , status400
   , status500
   )
-import Types
-  ( Registration
-  , AuthenticationData
-  , PersonId(..)
-  , GameId(..)
-  , NewGame(..)
-  )
-import Network.Wai
-import Control.Concurrent.Chan (Chan, newChan, writeChan)
-import Data.Binary.Builder (fromByteString)
-import Control.Monad.IO.Class (liftIO)
-
-import qualified Data.Text.Lazy as T
-import           Data.Text.Lazy (Text)
-import qualified Data.Text.Encoding as T (encodeUtf8, decodeUtf8)
-import qualified Data.Map.Lazy as Map
-import           Data.Map.Lazy (Map)
-import Data.ByteString.Char8 as BS8 (pack, unpack)
-import Data.ByteString as BS (ByteString, foldr', dropWhile, drop)
-import qualified Data.ByteString.Lazy as LBS (toStrict)
-import Data.ByteString.Builder (word8Hex, toLazyByteString)
-
-import Data.Int (Int64)
-
-import Database
-import Database.PostgreSQL.Simple (Connection)
-import qualified Database.Redis as Redis
-import System.Entropy (getEntropy)
-import qualified CouchDB
 import Network.HTTP.Client
   ( Manager
   , defaultManagerSettings
@@ -57,8 +28,31 @@ import Network.HTTP.ReverseProxy
   , defaultOnExc
   , ProxyDest(..)
   )
+
+import Web.Scotty
+
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as T (encodeUtf8)
+import qualified Data.ByteString.Char8 as BS8 (pack, unpack)
+import qualified Data.ByteString as BS
+import           Data.ByteString as BS (ByteString)
+import           Data.Binary.Builder (fromByteString)
 import qualified Data.UUID.Types as UUID (fromText)
 
+import           Database.PostgreSQL.Simple (Connection)
+import qualified Database.Redis as Redis
+
+import Auth
+import Database
+import qualified CouchDB
+import Types
+  ( Registration
+  , AuthenticationData
+  , PersonId(..)
+  , GameId(..)
+  , NewGame(..)
+  , AccessLevel
+  )
 
 main :: IO ()
 main =
@@ -107,12 +101,7 @@ main =
       Nothing ->
         raise "Error: Failed to login."
       Just personId -> do
-        sessionId <- liftIO $ genSessionId
-        let expiration = minutes 20
-        liftIO $ Redis.runRedis redisConn $ do
-          Redis.set sessionId (BS8.pack . show $ personId)
-          Redis.expire sessionId expiration
-        setAuthCookie sessionId expiration
+        createSession redisConn personId
         json personId
 
   get "/games" $ do
@@ -190,89 +179,6 @@ main =
               status status200 >>
               text ""
 
-
-------------------------------------------------------------
--- Authentication/Authorization
-------------------------------------------------------------
-
-checkAuth :: Redis.Connection
-          -> (PersonId -> ActionM ())
-          -> ActionM ()
-checkAuth redisConn handler = do
-  result <- authenticate redisConn
-  case result of
-    Left err       -> status err >> text ""
-    Right personId -> handler personId
-
-authenticate :: Redis.Connection -> ActionM (Either Status PersonId)
-authenticate redisConn = do
-  cookies <- getCookies
-  case Map.lookup "session" cookies of
-      Nothing ->
-        pure $ Left unauthorized401
-      Just sessionId -> do
-        -- lookup session in database to get person id
-        emPersonId <- liftIO $ Redis.runRedis redisConn $ do
-          Redis.get (T.encodeUtf8 . T.toStrict $ sessionId)
-        pure $ case emPersonId of
-          Left err -> do
-            Left unauthorized401
-          Right mPersonId ->
-            case mPersonId of
-              Nothing ->
-                Left unauthorized401
-              Just personId ->
-                Right $ PersonId $ read (BS8.unpack personId)
-
-            
-getCookies :: ActionM (Map Text Text)
-getCookies = do
-  mRawCookies <- header "Cookie"
-  pure $
-    case mRawCookies of
-      Nothing -> Map.empty
-      Just raw -> parseCookies raw
-
-setAuthCookie :: ByteString -> Integer -> ActionM ()
-setAuthCookie sessionId ttl = do
-  setHeader "Set-Cookie" cookie
-  where
-    cookie =
-      T.intercalate "; "
-      [ "session=" <> (T.fromStrict . T.decodeUtf8 $ sessionId)
-      , "HttpOnly"
-      -- , "Secure"
-      , "Max-Age=" <> (T.pack . show $ ttl)
-      -- , "Domain=" <> (T.pack .show $ domain)
-      -- , "Path=/"
-      ]
-
-parseCookies :: Text -> Map Text Text
-parseCookies =
-  Map.fromList . map pairs . entries
-  where
-    entries = T.splitOn "; "
-    pairs = fmap (T.drop 1) . T.breakOn "="
-
-genSessionId :: IO ByteString
-genSessionId = do
-  randBytes <- getEntropy 32
-  return $ "session:" <> prettyPrint randBytes
-  where
-    prettyPrint :: ByteString -> ByteString
-    prettyPrint
-      = LBS.toStrict
-      . toLazyByteString
-      . mconcat
-      . BS.foldr'
-      ( \ byte acc -> word8Hex byte:acc ) []
-
-hours :: Integer -> Integer
-hours h = 3600 * h
-
-minutes :: Integer -> Integer
-minutes m = 60 * m
-
 ------------------------------------------------------------
 -- Raw Endpoints
 ------------------------------------------------------------
@@ -293,9 +199,27 @@ couchProxy :: Manager
            -> Application -> Application
 couchProxy manager conn redisConn app req resp =
   case (requestMethod req, pathInfo req) of
-    (_, "couchdb":_) ->
-      waiProxyTo handler defaultOnExc manager req resp
+    (_, "couchdb":rawGameId:_) -> do
+      let
+        toGameId =
+          fmap GameId
+          . UUID.fromText
+          . T.drop 1
+          . T.dropWhile (/= '_')
+
+      case toGameId rawGameId of
+        Nothing ->
+          resp $ responseLBS unauthorized401 [] ""
+        Just gameId -> do
+          result <- checkAuthWai redisConn conn gameId req
+          case result of
+            Nothing ->
+              resp $ responseLBS unauthorized401 [] ""
+            Just access ->
+              waiProxyTo handler defaultOnExc manager req resp
+
     _ -> app req resp
+
   where
     handler req = do
       let newReq =
@@ -306,6 +230,4 @@ couchProxy manager conn redisConn app req resp =
                 . BS.drop 1
                 $ rawPathInfo req
             }
-      putStrLn $ "rawPathInfo: " <> show (rawPathInfo newReq)
-      putStrLn $ "pathInfo: " <> show (pathInfo newReq)
       pure $ WPRModifiedRequest newReq $ ProxyDest "127.0.0.1" 5984

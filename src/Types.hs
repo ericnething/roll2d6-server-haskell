@@ -130,7 +130,8 @@ instance FromJSON AuthenticationData where
 
 newtype PersonId = PersonId
   { unPersonId :: Int64
-  } deriving newtype (FromField, ToField, FromJSON, ToJSON, Parsable)
+  } deriving newtype
+      (FromField, ToField, FromJSON, ToJSON, Parsable, Read)
 
 instance Show PersonId where
   show (PersonId id_) = show id_
