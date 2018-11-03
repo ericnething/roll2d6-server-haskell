@@ -50,6 +50,9 @@ hours h = 3600 * h
 minutes :: Integer -> Integer
 minutes m = 60 * m
 
+oneYear :: Integer
+oneYear = 365 * (hours 24)
+
 checkAuth :: Redis.Connection
           -> (PersonId -> ActionM ())
           -> ActionM ()
@@ -164,4 +167,4 @@ createSession redisConn personId = do
   liftIO $ Redis.runRedis redisConn $ do
     Redis.set sessionId (BS8.pack . show $ personId)
     Redis.expire sessionId expiration
-  setAuthCookie sessionId expiration
+  setAuthCookie sessionId oneYear
