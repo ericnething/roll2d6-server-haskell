@@ -4,6 +4,8 @@ module Auth
   ( checkAuth
   , checkAuthWai
   , createSession
+  , deleteSession
+  , getSessionId
   )
 where
 
@@ -168,3 +170,10 @@ createSession redisConn personId = do
     Redis.set sessionId (BS8.pack . show $ personId)
     Redis.expire sessionId expiration
   setAuthCookie sessionId oneYear
+
+
+deleteSession :: Redis.Connection -> ByteString -> ActionM ()
+deleteSession redisConn sessionId = do
+  liftIO $ Redis.runRedis redisConn $ do
+    Redis.del [ sessionId ]
+  setAuthCookie "" 1

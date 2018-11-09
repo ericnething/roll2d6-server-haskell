@@ -11,10 +11,11 @@ import Network.Wai
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import Network.Wai.EventSource (ServerEvent(..), eventSourceAppChan)
 import Network.HTTP.Types
-  ( unauthorized401
-  , Status
+  ( Status
   , status200
   , status400
+  , unauthorized401
+  , notFound404
   , status500
   )
 import Network.HTTP.Client
@@ -68,11 +69,6 @@ main =
   waiApp $ subscription chan
 
 
-  get "/" $ do
-    setHeader "Content-Type" "text/html"
-    file "src/event-source.html"
-
-
   post "/send" $ do
     msg <- param "msg"
     let event =
@@ -103,6 +99,19 @@ main =
       Just personId -> do
         createSession redisConn personId
         json personId
+
+
+  post "/logout" $ do
+    mSessionId <- getSessionId <$> request
+    case mSessionId of
+      Nothing -> do
+        status notFound404
+        text ""
+      Just sessionId -> do
+        deleteSession redisConn sessionId
+        status status200
+        text ""
+
 
   get "/games" $ do
     checkAuth redisConn $ \personId -> do
@@ -199,6 +208,9 @@ couchProxy :: Manager
            -> Application -> Application
 couchProxy manager conn redisConn app req resp =
   case (requestMethod req, pathInfo req) of
+    (_, "couchdb":"":[]) -> do
+      waiProxyTo handler defaultOnExc manager req resp
+
     (_, "couchdb":rawGameId:_) -> do
       let
         toGameId =
