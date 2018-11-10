@@ -6,6 +6,7 @@ module Auth
   , createSession
   , deleteSession
   , getSessionId
+  , createInvite
   )
 where
 
@@ -129,9 +130,15 @@ splitOn sep s =
       (BS.breakSubstring sep s)
 
 genSessionId :: IO ByteString
-genSessionId = do
+genSessionId = fmap ("session:" <>) genRandomId
+
+genInviteId :: IO ByteString
+genInviteId = fmap ("invite:" <>) genRandomId
+
+genRandomId :: IO ByteString
+genRandomId = do
   randBytes <- getEntropy 32
-  return $ "session:" <> prettyPrint randBytes
+  return $ prettyPrint randBytes
   where
     prettyPrint :: ByteString -> ByteString
     prettyPrint
@@ -177,3 +184,13 @@ deleteSession redisConn sessionId = do
   liftIO $ Redis.runRedis redisConn $ do
     Redis.del [ sessionId ]
   setAuthCookie "" 1
+
+
+createInvite :: Redis.Connection -> GameId -> ActionM (Maybe ByteString)
+createInvite redisConn (GameId gameId) = do
+  rawInviteId <- liftIO genRandomId
+  let inviteId = "invite:" <> rawInviteId
+  emStatus <- liftIO $ Redis.runRedis redisConn $ do
+    Redis.set inviteId (BS8.pack . show $ gameId)
+    Redis.expire inviteId (hours 2)
+  pure (Just rawInviteId)

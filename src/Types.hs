@@ -230,3 +230,4 @@ instance FromJSON NewGame where
       <$> v .: "title"
 
   parseJSON _ = empty
+

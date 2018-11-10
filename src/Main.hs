@@ -38,7 +38,7 @@ import qualified Data.ByteString.Char8 as BS8 (pack, unpack)
 import qualified Data.ByteString as BS
 import           Data.ByteString as BS (ByteString)
 import           Data.Binary.Builder (fromByteString)
-import qualified Data.UUID.Types as UUID (fromText)
+import qualified Data.UUID.Types as UUID
 
 import           Database.PostgreSQL.Simple (Connection)
 import qualified Database.Redis as Redis
@@ -52,7 +52,7 @@ import Types
   , PersonId(..)
   , GameId(..)
   , NewGame(..)
-  , AccessLevel
+  , AccessLevel(..)
   )
 
 main :: IO ()
@@ -168,6 +168,47 @@ main =
             Just _ ->
               status status200 >>
               text ""
+
+
+  put "/games/:gameId/invite" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status unauthorized401 >> text ""
+        Just _ -> do
+          mInviteId <- createInvite redisConn gameId
+          case mInviteId of
+            Nothing ->
+              status status500 >> text ""
+            Just inviteId ->
+              json (BS8.unpack $ inviteId)
+
+
+  post "/invite/:inviteId" $
+    checkAuth redisConn $ \personId -> do
+      inviteId <- param "inviteId"
+      emGameId <- liftIO $ Redis.runRedis redisConn $ do
+        Redis.get ("invite:" <> inviteId)
+      case emGameId of
+        Right (Just rawGameId) ->
+          case GameId <$> UUID.fromASCIIBytes rawGameId of
+            Nothing ->
+              status status500 >>
+              text "The game id is not valid"
+            Just gameId -> do
+              mResult <- liftIO $
+                addPersonToGame conn personId gameId
+              case mResult of
+                Nothing ->
+                  status status500 >>
+                  text "Could not add player to the game"
+                Just _ ->
+                  json gameId
+        _ ->
+          status notFound404 >> text ""
+
 
   delete "/games/:gameId/players/:playerId" $
     checkAuth redisConn $ \personId -> do
