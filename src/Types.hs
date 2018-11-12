@@ -18,7 +18,8 @@ where
 
 import           Data.Text (Text)
 import qualified Data.Text as T (dropWhile, drop)
-import Data.Text.Lazy as LT (toStrict)
+import           Data.Text.Lazy as LT (toStrict)
+
 import Data.Aeson
   ( FromJSON(..)
   , ToJSON(..)
@@ -28,16 +29,21 @@ import Data.Aeson
   , object
   , genericToEncoding
   , defaultOptions
+  , pairs
   )
-import Control.Applicative (empty)
-import Data.Int (Int64)
+import Data.Aeson.Encoding (string)
+
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.ToField
-import GHC.Generics
+import Data.Int (Int64)
+
 import           Data.UUID.Types (UUID)
 import qualified Data.UUID.Types as UUID (fromText, toText)
+
 import Web.Scotty (Parsable(..))
+import GHC.Generics
+import Control.Applicative (empty)
 
 
 ------------------------------------------------------------
@@ -81,15 +87,15 @@ data Registration = Registration
   { _registrationUsername :: Text
   , _registrationEmail    :: Text
   , _registrationPassword :: Text
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 instance ToJSON Registration where
-  toJSON (Registration username email password)
-    = object
-      [ "username" .= username
-      , "email"    .= email
-      , "password" .= password
-      ]
+  toEncoding (Registration username email password)
+    = pairs
+      (  "username" .= username
+      <> "email"    .= email
+      <> "password" .= password
+      )
 
 instance FromJSON Registration where
   parseJSON (Object v)
@@ -107,14 +113,14 @@ instance FromJSON Registration where
 data AuthenticationData = AuthenticationData
   { _authEmail    :: Text
   , _authPassword :: Text
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 instance ToJSON AuthenticationData where
-  toJSON (AuthenticationData email password)
-    = object
-      [ "email"    .= email
-      , "password" .= password
-      ]
+  toEncoding (AuthenticationData email password)
+    = pairs
+      (  "email"    .= email
+      <> "password" .= password
+      )
 
 instance FromJSON AuthenticationData where
   parseJSON (Object v)
@@ -148,15 +154,15 @@ data Person = Person
   { _personId       :: PersonId
   , _personUsername :: Text
   , _personAccess   :: AccessLevel
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 instance ToJSON Person where
-  toJSON (Person (PersonId id_) username access)
-    = object
-      [ "id"       .= id_
-      , "username" .= username
-      , "access"   .= access
-      ]
+  toEncoding (Person (PersonId id_) username access)
+    = pairs
+      (  "id"       .= id_
+      <> "username" .= username
+      <> "access"   .= access
+      )
 
 instance FromRow Person where
   fromRow = Person
@@ -191,6 +197,7 @@ instance Parsable GameId where
 
 instance ToJSON GameId where
   toJSON (GameId uuid) = toJSON ("game_" <> (show uuid))
+  toEncoding (GameId uuid) = string ("game_" <> (show uuid))
 
 instance Show GameId where
   show (GameId uuid) = "game_" <> show uuid
@@ -202,7 +209,7 @@ instance Show GameId where
 data Game = Game
   { _gameId    :: GameId
   , _gameTitle :: Text
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 instance FromRow Game where
   fromRow = Game
@@ -210,11 +217,11 @@ instance FromRow Game where
     <*> field
 
 instance ToJSON Game where
-  toJSON (Game id_ title)
-    = object
-      [ "id"    .= id_
-      , "title" .= title
-      ]
+  toEncoding (Game id_ title)
+    = pairs
+      (  "id"    .= id_
+      <> "title" .= title
+      )
 
 ------------------------------------------------------------
 -- NewGame

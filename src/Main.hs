@@ -4,7 +4,10 @@
 module Main where
 
 import Data.Monoid (mconcat, (<>))
+import Control.Exception (catch, SomeException(..))
+import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
+import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.Chan (Chan, newChan, writeChan)
 
 import Network.Wai
@@ -39,6 +42,8 @@ import qualified Data.ByteString as BS
 import           Data.ByteString as BS (ByteString)
 import           Data.Binary.Builder (fromByteString)
 import qualified Data.UUID.Types as UUID
+import Data.Aeson (ToJSON(toEncodingList))
+import Data.Aeson.Encoding (fromEncoding)
 
 import           Database.PostgreSQL.Simple (Connection)
 import qualified Database.Redis as Redis
@@ -50,6 +55,7 @@ import Types
   ( Registration
   , AuthenticationData
   , PersonId(..)
+  , Person
   , GameId(..)
   , NewGame(..)
   , AccessLevel(..)
@@ -58,6 +64,8 @@ import Types
 main :: IO ()
 main =
   newChan >>= \chan ->
+                (forkIO $ forever $
+                  threadDelay 15000 >> pingSubscriber chan) >>
   getConnection >>= \conn ->
   Redis.checkedConnect Redis.defaultConnectInfo >>= \redisConn ->
   newManager defaultManagerSettings >>= \manager ->
@@ -66,18 +74,7 @@ main =
   middleware logStdoutDev
 
   waiApp $ couchProxy manager conn redisConn
-  waiApp $ subscription chan
-
-
-  post "/send" $ do
-    msg <- param "msg"
-    let event =
-          ServerEvent
-          { eventName = Just (fromByteString "Message")
-          , eventId = Nothing
-          , eventData = [fromByteString (T.encodeUtf8 msg)]
-          }
-    liftIO $ writeChan chan event
+  waiApp $ subscription conn redisConn chan
 
 
   post "/register" $ do
@@ -165,8 +162,10 @@ main =
             Nothing ->
               status status500 >>
               text "Could not add player to the game"
-            Just _ ->
-              status status200 >>
+            Just _ -> do
+              players <- liftIO $ listPeopleInGame conn gameId
+              liftIO $ writeChan chan (sse_playerList players)
+              status status200
               text ""
 
 
@@ -225,8 +224,10 @@ main =
             Nothing ->
               status status500 >>
               text "Could not remove player from the game"
-            Just _ ->
-              status status200 >>
+            Just _ -> do
+              players <- liftIO $ listPeopleInGame conn gameId
+              liftIO $ writeChan chan (sse_playerList players)
+              status status200
               text ""
 
 ------------------------------------------------------------
@@ -236,11 +237,38 @@ main =
 waiApp :: Middleware -> ScottyM ()
 waiApp = middleware
 
-subscription :: Chan ServerEvent -> Application -> Application
-subscription chan app req resp =
+pingSubscriber :: Chan ServerEvent -> IO ()
+pingSubscriber chan =
+  writeChan chan $ CommentEvent ""
+
+subscription :: Connection
+             -> Redis.Connection
+             -> Chan ServerEvent
+             -> Application
+             -> Application
+subscription conn redisConn chan app req resp =
   case (requestMethod req, pathInfo req) of
-    (_, "subscribe":_) ->
-      eventSourceAppChan chan req resp
+    (_, "subscribe":rawGameId:_) -> do
+      let
+        toGameId =
+          fmap GameId
+          . UUID.fromText
+          . T.drop 1
+          . T.dropWhile (/= '_')
+      case toGameId rawGameId of
+        Nothing ->
+          resp $ responseLBS notFound404 [] ""
+        Just gameId -> do
+          result <- checkAuthWai redisConn conn gameId req
+          case result of
+            Nothing ->
+              resp $ responseLBS unauthorized401 [] ""
+            Just access ->
+              eventSourceAppChan chan req resp
+              `catch` \(SomeException e) -> do
+                        print e
+                        resp $ responseLBS status500 [] ""
+              
     _ -> app req resp
 
 couchProxy :: Manager
@@ -262,7 +290,7 @@ couchProxy manager conn redisConn app req resp =
 
       case toGameId rawGameId of
         Nothing ->
-          resp $ responseLBS unauthorized401 [] ""
+          resp $ responseLBS notFound404 [] ""
         Just gameId -> do
           result <- checkAuthWai redisConn conn gameId req
           case result of
@@ -284,3 +312,14 @@ couchProxy manager conn redisConn app req resp =
                 $ rawPathInfo req
             }
       pure $ WPRModifiedRequest newReq $ ProxyDest "127.0.0.1" 5984
+
+
+
+
+sse_playerList :: [Person] -> ServerEvent
+sse_playerList players =
+  ServerEvent
+  { eventName = Just (fromByteString "player-list")
+  , eventId = Nothing
+  , eventData = [fromEncoding (toEncodingList players)]
+  }
