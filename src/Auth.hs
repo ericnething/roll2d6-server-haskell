@@ -152,7 +152,7 @@ checkAuthWai :: Redis.Connection
              -> Connection
              -> GameId
              -> Request
-             -> IO (Maybe AccessLevel)
+             -> IO (Maybe (PersonId, AccessLevel))
 checkAuthWai redisConn conn gameId req = do
   case getSessionId req of
     Nothing -> pure Nothing
@@ -160,8 +160,9 @@ checkAuthWai redisConn conn gameId req = do
       result <- authenticate redisConn sessionId
       case result of
         Nothing -> pure Nothing
-        Just personId ->
-          verifyGameAccess conn personId gameId
+        Just personId -> do
+          mAccess <- verifyGameAccess conn personId gameId
+          pure $ fmap ((,) personId) mAccess
 
 getSessionId :: Request -> Maybe ByteString
 getSessionId req =

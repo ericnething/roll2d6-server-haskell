@@ -4,20 +4,28 @@
 module Main where
 
 import Data.Monoid (mconcat, (<>))
-import Control.Exception (catch, SomeException(..))
+import Data.Foldable (traverse_)
+import Control.Exception (catch, SomeException(..), try, finally)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent (threadDelay, forkIO)
-import Control.Concurrent.Chan (Chan, newChan, writeChan)
+import Control.Concurrent.STM (atomically)
+import Control.Concurrent.STM.TChan
+  ( TChan
+  , newBroadcastTChanIO
+  , writeTChan
+  )
 
 import Network.Wai
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
-import Network.Wai.EventSource (ServerEvent(..), eventSourceAppChan)
+import EventSource (ServerEvent(..), eventSourceAppTChan)
 import Network.HTTP.Types
   ( Status
   , status200
+  , noContent204
   , status400
   , unauthorized401
+  , forbidden403
   , notFound404
   , status500
   )
@@ -33,6 +41,8 @@ import Network.HTTP.ReverseProxy
   , ProxyDest(..)
   )
 
+import qualified Data.Time as Time
+import           Data.Time (UTCTime)
 import Web.Scotty
 
 import qualified Data.Text as T
@@ -42,11 +52,18 @@ import qualified Data.ByteString as BS
 import           Data.ByteString as BS (ByteString)
 import           Data.Binary.Builder (fromByteString)
 import qualified Data.UUID.Types as UUID
-import Data.Aeson (ToJSON(toEncodingList))
+import Data.Aeson (ToJSON(toEncodingList, toEncoding))
 import Data.Aeson.Encoding (fromEncoding)
 
 import           Database.PostgreSQL.Simple (Connection)
 import qualified Database.Redis as Redis
+
+import qualified StmContainers.Map as STMMap
+import qualified Data.Map.Strict as Map
+import           Data.Map.Strict (Map)
+import qualified Focus
+import Data.Int (Int64)
+import qualified ListT
 
 import Auth
 import Database
@@ -59,24 +76,43 @@ import Types
   , GameId(..)
   , NewGame(..)
   , AccessLevel(..)
+  , updatePresence
+  , PersonPresence(..)
   )
 
 main :: IO ()
 main =
-  newChan >>= \chan ->
-                (forkIO $ forever $
-                  threadDelay 15000 >> pingSubscriber chan) >>
+  -- Create a user presence Map
+  STMMap.newIO >>= \presenceMap ->
+  
+  -- Create a broadcast channel
+  newBroadcastTChanIO >>= \chan ->
+
+  -- Ping all subscribers to the channel every 15 seconds
+  (forkIO $ pingChannel chan 15) >>
+
+  -- Timeout expired presence
+  (forkIO $ timeoutPresence chan presenceMap 60) >>
+
+  -- Connect to Postgres
   getConnection >>= \conn ->
+
+  -- Connect to Redis
   Redis.checkedConnect Redis.defaultConnectInfo >>= \redisConn ->
+
+  -- Create a Manager for the reverse proxy
   newManager defaultManagerSettings >>= \manager ->
+
+  -- Run Scotty
   scotty 3000 $ do
   
   middleware logStdoutDev
 
   waiApp $ couchProxy manager conn redisConn
-  waiApp $ subscription conn redisConn chan
+  waiApp $ subscription conn redisConn chan presenceMap
 
 
+  -- API: register a user account
   post "/register" $ do
     reg :: Registration <- jsonData
     mPersonId <- liftIO $ createPerson conn reg
@@ -86,7 +122,7 @@ main =
       Just personId ->
         json personId
 
-
+  -- API: log in to a user account
   post "/login" $ do
     authData :: AuthenticationData <- jsonData
     mPersonId <- liftIO $ verifyAuthentication conn authData
@@ -97,25 +133,23 @@ main =
         createSession redisConn personId
         json personId
 
-
+  -- API: log out of a user account
   post "/logout" $ do
     mSessionId <- getSessionId <$> request
     case mSessionId of
       Nothing -> do
         status notFound404
-        text ""
       Just sessionId -> do
         deleteSession redisConn sessionId
         status status200
-        text ""
 
-
+  -- API: get a list of all games for a user account
   get "/games" $ do
     checkAuth redisConn $ \personId -> do
       games <- liftIO $ getGamesForPersonId conn personId
       json games
 
-
+  -- API: create a new game
   post "/games" $ do
     checkAuth redisConn $ \personId -> do
       newGame <- jsonData
@@ -131,23 +165,32 @@ main =
         CouchDB.createDatabase gameId
       case mCouchStatus of
         Nothing ->
-          status status500 >> text ""
+          status status500
         Just _ ->
           json gameId
 
-
+  -- API: get a list of all players in a game
   get "/games/:gameId/players" $
     checkAuth redisConn $ \personId -> do
     gameId <- param "gameId"
     mAccess <- liftIO $ verifyGameAccess conn personId gameId
     case mAccess of
       Nothing ->
-        status unauthorized401 >> text ""
+        status unauthorized401
       Just _ -> do
         players <- liftIO $ listPeopleInGame conn gameId
-        json players
+        mPresence <- liftIO $ atomically $ STMMap.focus
+          Focus.lookup
+          (BS8.pack . show $ gameId)
+          presenceMap
+        case mPresence of
+          Nothing ->
+            json players
+          Just presence ->
+            json $ map (updatePresence presence) players
+            
 
-
+  -- API: add a player to a game
   post "/games/:gameId/players" $
     checkAuth redisConn $ \personId -> do
       gameId <- param "gameId"
@@ -155,7 +198,7 @@ main =
       mAccess <- liftIO $ verifyGameAccess conn personId gameId
       case mAccess of
         Nothing ->
-          status unauthorized401 >> text ""
+          status unauthorized401
         Just _ -> do
           mResult <- liftIO $ addPersonToGame conn playerId gameId
           case mResult of
@@ -164,27 +207,28 @@ main =
               text "Could not add player to the game"
             Just _ -> do
               players <- liftIO $ listPeopleInGame conn gameId
-              liftIO $ writeChan chan (sse_playerList players)
+              liftIO . atomically $
+                writeTChan chan ( BS8.pack . show $ gameId
+                                , sse_playerList players)
               status status200
-              text ""
 
-
+  -- API: create an invite to a game
   put "/games/:gameId/invite" $ do
     checkAuth redisConn $ \personId -> do
       gameId <- param "gameId"
       mAccess <- liftIO $ verifyGameAccess conn personId gameId
       case mAccess of
         Nothing ->
-          status unauthorized401 >> text ""
+          status unauthorized401
         Just _ -> do
           mInviteId <- createInvite redisConn gameId
           case mInviteId of
             Nothing ->
-              status status500 >> text ""
+              status status500
             Just inviteId ->
               json (BS8.unpack $ inviteId)
 
-
+  -- API: use an invite to join a game
   post "/invite/:inviteId" $
     checkAuth redisConn $ \personId -> do
       inviteId <- param "inviteId"
@@ -206,9 +250,9 @@ main =
                 Just _ ->
                   json gameId
         _ ->
-          status notFound404 >> text ""
+          status notFound404
 
-
+  -- API: remove a player from a game
   delete "/games/:gameId/players/:playerId" $
     checkAuth redisConn $ \personId -> do
       gameId <- param "gameId"
@@ -216,7 +260,7 @@ main =
       mAccess <- liftIO $ verifyGameAccess conn personId gameId
       case mAccess of
         Nothing ->
-          status unauthorized401 >> text ""
+          status unauthorized401
         Just _ -> do
           mResult <- liftIO $
             removePersonFromGame conn playerId gameId
@@ -226,9 +270,47 @@ main =
               text "Could not remove player from the game"
             Just _ -> do
               players <- liftIO $ listPeopleInGame conn gameId
-              liftIO $ writeChan chan (sse_playerList players)
+              liftIO . atomically $
+                writeTChan chan ( BS8.pack . show $ gameId
+                                , sse_playerList players)
               status status200
-              text ""
+
+  -- API: ping the server
+  post "/games/:gameId/ping" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status forbidden403
+        Just _ -> do
+          liftIO $
+            resetPresenceTimeout chan presenceMap gameId personId
+          status noContent204
+
+
+  -- API: update presence
+  post "/games/:gameId/presence/:presence" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      presence :: T.Text <- param "presence"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status forbidden403
+        Just _ -> do
+          case presence of
+            "online" -> do
+              liftIO $
+                setPlayerOnline chan presenceMap gameId personId
+              status noContent204
+            "offline" -> do
+              liftIO $
+                setPlayerOffline chan presenceMap gameId personId
+              status noContent204
+            _ ->
+              status notFound404
+              
 
 ------------------------------------------------------------
 -- Raw Endpoints
@@ -237,16 +319,17 @@ main =
 waiApp :: Middleware -> ScottyM ()
 waiApp = middleware
 
-pingSubscriber :: Chan ServerEvent -> IO ()
+pingSubscriber :: TChan (ByteString, ServerEvent) -> IO ()
 pingSubscriber chan =
-  writeChan chan $ CommentEvent ""
+  atomically $ writeTChan chan ("*", CommentEvent "")
 
 subscription :: Connection
              -> Redis.Connection
-             -> Chan ServerEvent
+             -> TChan (ByteString, ServerEvent)
+             -> STMMap.Map ByteString (Map PersonId UTCTime)
              -> Application
              -> Application
-subscription conn redisConn chan app req resp =
+subscription conn redisConn chan presenceMap app req resp =
   case (requestMethod req, pathInfo req) of
     (_, "subscribe":rawGameId:_) -> do
       let
@@ -263,13 +346,100 @@ subscription conn redisConn chan app req resp =
           case result of
             Nothing ->
               resp $ responseLBS unauthorized401 [] ""
-            Just access ->
-              eventSourceAppChan chan req resp
-              `catch` \(SomeException e) -> do
-                        print e
-                        resp $ responseLBS status500 [] ""
-              
+            Just (personId, access) -> do
+              setPlayerOnline chan presenceMap gameId personId
+              eventSourceAppTChan
+                (BS8.pack . show $ gameId) chan req resp
+              resp $ responseLBS noContent204 [] ""
+
     _ -> app req resp
+
+
+setPlayerOnline :: TChan (ByteString, ServerEvent)
+                -> STMMap.Map ByteString (Map PersonId UTCTime)
+                -> GameId
+                -> PersonId
+                -> IO ()
+setPlayerOnline chan presenceMap gameId personId = do
+      putStrLn $ show personId <> " is online"
+      now <- Time.getCurrentTime
+      atomically $ STMMap.focus
+        (Focus.insertOrMerge
+          Map.union
+          (Map.singleton personId now))
+        (BS8.pack . show $ gameId)
+        presenceMap
+      atomically $
+        writeTChan
+        chan
+        ( BS8.pack . show $ gameId
+        , sse_playerPresence [PersonPresence personId True])
+
+setPlayerOffline :: TChan (ByteString, ServerEvent)
+                 -> STMMap.Map ByteString (Map PersonId UTCTime)
+                 -> GameId
+                 -> PersonId
+                 -> IO ()
+setPlayerOffline chan presenceMap gameId personId = do
+      putStrLn $ show personId <> " is offline"
+      atomically $ STMMap.focus
+        (Focus.update (Just . Map.delete personId))
+        (BS8.pack . show $ gameId)
+        presenceMap
+      atomically $
+        writeTChan
+        chan
+        ( BS8.pack . show $ gameId
+        , sse_playerPresence [PersonPresence personId False])
+
+resetPresenceTimeout :: TChan (ByteString, ServerEvent)
+                     -> STMMap.Map ByteString (Map PersonId UTCTime)
+                     -> GameId
+                     -> PersonId
+                     -> IO ()
+resetPresenceTimeout chan presenceMap gameId personId = do
+      now <- Time.getCurrentTime
+      atomically $ STMMap.focus
+        (Focus.insertOrMerge
+          Map.union (Map.singleton personId now))
+        (BS8.pack . show $ gameId)
+        presenceMap
+
+removeExpiredPresenceForGame :: TChan (ByteString, ServerEvent)
+                             -> STMMap.Map ByteString (Map PersonId UTCTime)
+                             -> ByteString
+                             -> IO ()
+removeExpiredPresenceForGame chan presenceMap gameId = do
+  let gameKey = gameId -- BS8.pack . show $ gameId
+  now <- Time.getCurrentTime
+  expired <- atomically $ do
+    mGame <- STMMap.focus Focus.lookup gameKey presenceMap
+    case mGame of
+      Nothing -> pure Map.empty
+      Just game -> do
+        let (expired, valid) = Map.partition (isExpired now) game
+        STMMap.focus
+          (Focus.update (const $ Just valid))
+          gameKey
+          presenceMap
+        pure expired
+  atomically $ writeTChan chan
+    (gameKey, sse_playerPresence (toPresenceList expired))
+  where
+    isExpired now = (> 60) . Time.diffUTCTime now
+    toPresenceList expired =
+      map
+      (\personId -> PersonPresence personId False)
+      (Map.keys expired)
+      
+removeExpiredPresence :: TChan (ByteString, ServerEvent)
+                      -> STMMap.Map ByteString (Map PersonId UTCTime)
+                      -> IO ()
+removeExpiredPresence chan presenceMap = do
+  keys <- atomically . (fmap . fmap) fst $
+          ListT.toList (STMMap.listT presenceMap)
+  traverse_ (removeExpiredPresenceForGame chan presenceMap) keys
+
 
 couchProxy :: Manager
            -> Connection
@@ -296,7 +466,7 @@ couchProxy manager conn redisConn app req resp =
           case result of
             Nothing ->
               resp $ responseLBS unauthorized401 [] ""
-            Just access ->
+            Just (_, access) ->
               waiProxyTo handler defaultOnExc manager req resp
 
     _ -> app req resp
@@ -323,3 +493,28 @@ sse_playerList players =
   , eventId = Nothing
   , eventData = [fromEncoding (toEncodingList players)]
   }
+
+sse_playerPresence :: [PersonPresence] -> ServerEvent
+sse_playerPresence presenceList =
+  ServerEvent
+  { eventName = Just (fromByteString "player-presence")
+  , eventId = Nothing
+  , eventData = [fromEncoding (toEncodingList presenceList)]
+  }
+
+
+pingChannel :: TChan (ByteString, ServerEvent) -> Int -> IO ()
+pingChannel chan seconds =
+  forever $
+  threadDelay (seconds * 1000 * 1000)
+  >> pingSubscriber chan
+
+
+timeoutPresence :: TChan (ByteString, ServerEvent)
+                -> STMMap.Map ByteString (Map PersonId UTCTime)
+                -> Int
+                -> IO ()
+timeoutPresence chan presenceMap seconds =
+  forever $
+  threadDelay (seconds * 1000 * 1000)
+  >> removeExpiredPresence chan presenceMap

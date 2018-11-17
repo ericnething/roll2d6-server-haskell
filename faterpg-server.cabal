@@ -21,6 +21,7 @@ executable faterpg-server
                      , Database
                      , CouchDB
                      , Auth
+                     , EventSource
   -- other-extensions:
   build-depends:       base >=4.11 && <4.12
                      , scotty
@@ -41,5 +42,10 @@ executable faterpg-server
                      , http-reverse-proxy
                      , http-client
                      , uuid-types
+                     , stm
+                     , stm-containers
+                     , focus
+                     , time
+                     , list-t
   hs-source-dirs:      src
   default-language:    Haskell2010

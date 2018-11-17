@@ -13,6 +13,8 @@ module Types
   , Game(..)
   , GameId(..)
   , NewGame(..)
+  , updatePresence
+  , PersonPresence(..)
   )
 where
 
@@ -44,6 +46,9 @@ import qualified Data.UUID.Types as UUID (fromText, toText)
 import Web.Scotty (Parsable(..))
 import GHC.Generics
 import Control.Applicative (empty)
+import qualified Data.Map.Strict as Map (member)
+import           Data.Map.Strict (Map)
+import           Data.Time (UTCTime)
 
 
 ------------------------------------------------------------
@@ -137,7 +142,7 @@ instance FromJSON AuthenticationData where
 newtype PersonId = PersonId
   { unPersonId :: Int64
   } deriving newtype
-      (FromField, ToField, FromJSON, ToJSON, Parsable, Read)
+      (FromField, ToField, FromJSON, ToJSON, Parsable, Read, Eq, Ord)
 
 instance Show PersonId where
   show (PersonId id_) = show id_
@@ -154,21 +159,43 @@ data Person = Person
   { _personId       :: PersonId
   , _personUsername :: Text
   , _personAccess   :: AccessLevel
+  , _personPresence :: Bool
   } deriving (Show, Generic)
 
 instance ToJSON Person where
-  toEncoding (Person (PersonId id_) username access)
+  toEncoding (Person (PersonId id_) username access presence)
     = pairs
       (  "id"       .= id_
       <> "username" .= username
       <> "access"   .= access
+      <> "presence" .= if presence
+                       then "online" :: Text
+                       else "offline"
       )
 
 instance FromRow Person where
-  fromRow = Person
+  fromRow = (\a b c -> Person a b c False)
     <$> field
     <*> field
     <*> field
+
+updatePresence :: Map PersonId UTCTime -> Person -> Person
+updatePresence presence person =
+  person { _personPresence = Map.member pid presence }
+  where
+    pid = _personId $ person
+
+data PersonPresence = PersonPresence PersonId Bool
+  deriving (Generic)
+
+instance ToJSON PersonPresence where
+  toEncoding (PersonPresence (PersonId id_) presence)
+    = pairs
+    (  "id" .= id_
+    <> "presence" .= if presence
+                     then "online" :: Text
+                     else "offline"
+    )
 
 ------------------------------------------------------------
 -- GameId
