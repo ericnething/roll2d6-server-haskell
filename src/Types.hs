@@ -3,20 +3,9 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module Types
-  ( AccessLevel(..)
-  , Registration(..)
-  , AuthenticationData(..)
-  , Person(..)
-  , PersonId(..)
-  , Game(..)
-  , GameId(..)
-  , NewGame(..)
-  , updatePresence
-  , PersonPresence(..)
-  )
-where
+module Types where
 
 import           Data.Text (Text)
 import qualified Data.Text as T (dropWhile, drop)
@@ -38,6 +27,7 @@ import Data.Aeson.Encoding (string)
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.FromField
 import Database.PostgreSQL.Simple.ToField
+import Database.PostgreSQL.Simple.Errors (ConstraintViolation(..))
 import Data.Int (Int64)
 
 import           Data.UUID.Types (UUID)
@@ -45,11 +35,131 @@ import qualified Data.UUID.Types as UUID (fromText, toText)
 
 import Web.Scotty (Parsable(..))
 import GHC.Generics
-import Control.Applicative (empty)
+import Control.Applicative (empty, (<|>))
+import Data.Maybe (fromJust)
+
 import qualified Data.Map.Strict as Map (member)
 import           Data.Map.Strict (Map)
 import           Data.Time (UTCTime)
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 
+import Control.Exception (throw)
+
+------------------------------------------------------------
+-- Chat Message Type
+------------------------------------------------------------
+
+data ChatMessageType
+  = ChatMessageType
+  | DiceRollMessageType
+  deriving (Generic, Eq)
+
+instance ToJSON ChatMessageType where
+  toEncoding ChatMessageType = string "ChatMessage"
+  toEncoding DiceRollMessageType = string "DiceRollMessage"
+
+instance FromJSON ChatMessageType where
+  parseJSON (String "ChatMessage") = pure ChatMessageType
+  parseJSON (String "DiceRollMessage") = pure DiceRollMessageType
+  parseJSON _ = empty
+
+instance Show ChatMessageType where
+  show msg = case msg of
+    ChatMessageType     -> "ChatMessage"
+    DiceRollMessageType -> "DiceRollMessage"
+
+instance FromField ChatMessageType where
+  fromField f mdata = case mdata of
+    Just "chat_message" -> pure ChatMessageType
+    Just "dice_roll"    -> pure DiceRollMessageType
+    Just _ -> returnError ConversionFailed f
+              "Unrecognized value for ChatMessageType"
+    _ -> returnError UnexpectedNull f "Null value for ChatMessageType"
+
+instance ToField ChatMessageType where
+  toField msg = case msg of
+    ChatMessageType     -> Escape "chat_message"
+    DiceRollMessageType -> Escape "dice_roll"
+
+------------------------------------------------------------
+-- Chat Message
+------------------------------------------------------------
+
+data ChatMessage
+  = ChatMessage
+    { _chatMessageTimestamp  :: UTCTime
+    , _chatMessagePlayerId   :: PersonId
+    , _chatMessagePlayerName :: Text
+    , _chatMessageBody       :: Text
+    }
+  | DiceRollMessage
+    { _chatMessageTimestamp  :: UTCTime
+    , _chatMessagePlayerId   :: PersonId
+    , _chatMessagePlayerName :: Text
+    , _chatMessageDiceResult :: Value
+    }  
+  deriving (Generic)
+
+instance ToJSON ChatMessage where
+  toEncoding (ChatMessage time pid name body)
+    = pairs
+      (  "ctor"       .= ChatMessageType
+      <> "timestamp"  .= (utcTimeToPOSIXSeconds time * 10^3)
+      <> "playerId"   .= pid
+      <> "playerName" .= name
+      <> "body"       .= body
+      )
+  toEncoding (DiceRollMessage time pid name result)
+    = pairs
+      (  "ctor"       .= DiceRollMessageType
+      <> "timestamp"  .= (utcTimeToPOSIXSeconds time * 10^3)
+      <> "playerId"   .= pid
+      <> "playerName" .= name
+      <> "result"     .= result
+      )
+
+
+instance FromRow ChatMessage where
+  fromRow = do
+    ctor :: ChatMessageType <- field
+    case ctor of
+      ChatMessageType ->
+        ChatMessage
+         <$> field
+         <*> field
+         <*> field
+         <*> ((flip fmap) field $ maybe
+               (throw $ NotNullViolation
+                 "ChatMessage body is null")
+               id)
+         <*  (field :: RowParser (Maybe Value))
+
+      DiceRollMessageType ->
+        DiceRollMessage
+          <$> field
+          <*> field
+          <*> field
+          <*  (field :: RowParser (Maybe Text))
+          <*> ((flip fmap) field $ maybe
+                (throw $ NotNullViolation
+                  "ChatMessage dice_result is null")
+                id)
+
+------------------------------------------------------------
+-- New Chat Message
+------------------------------------------------------------
+
+data NewChatMessage
+  = NewChatMessage Text
+  | NewDiceRollMessage Value
+
+instance FromJSON NewChatMessage where
+  parseJSON (Object v) = do
+    ctor :: Text <- v .: "ctor"
+    case ctor of
+      "ChatMessage" -> NewChatMessage <$> v .: "body"
+      "DiceRollMessage" -> NewDiceRollMessage <$> v .: "result"
+      _ -> empty
 
 ------------------------------------------------------------
 -- Access Level

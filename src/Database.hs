@@ -7,6 +7,7 @@ import Types
 import Database.PostgreSQL.Simple
 import Data.Int (Int64)
 import Data.Text (Text)
+import qualified Data.Aeson as Json (encode)
 
 getConnection :: IO Connection
 getConnection = connect $ ConnectInfo
@@ -141,3 +142,56 @@ verifyGameAccess conn personId gameId = do
       \  FROM person_game_relation \
       \  WHERE person_id = ? \
       \  AND game_id = ?;"
+
+
+insertChatMessage :: Connection
+                  -> PersonId
+                  -> GameId
+                  -> NewChatMessage
+                  -> IO (Maybe ChatMessage)
+insertChatMessage conn personId gameId message = do
+  result <- case message of
+    NewChatMessage body ->
+      query conn (sql "body")
+        (personId, gameId, ChatMessageType, body)
+
+    NewDiceRollMessage diceResult ->
+      query conn (sql "dice_result")
+        (personId, gameId, DiceRollMessageType, diceResult)
+
+  pure $
+    case result of
+      []            -> Nothing
+      chatMessage:_ -> Just chatMessage
+
+  where
+    sql bodyOrResult =
+      "WITH message as ( \
+      \    INSERT INTO chat_message \
+      \    (person_id, game_id, ctor, " <> bodyOrResult <> ") \
+      \    VALUES (?, ?, ?, ?) \
+      \    RETURNING * \
+      \) \
+      \  SELECT m.ctor, m.created_at, m.person_id, \
+      \         p.username, m.body, m.dice_result \
+      \  FROM message as m \
+      \  INNER JOIN person as p \
+      \  ON p.id = m.person_id;"
+
+
+getChatLog :: Connection
+           -> GameId
+           -> Int64
+           -> IO [ChatMessage]
+getChatLog conn gameId limit = do
+  query conn sql (gameId, limit)
+  where
+    sql =
+      "SELECT ctor, chat.created_at, person_id, \
+      \       person.username, body, dice_result \
+      \  FROM chat_message as chat\
+      \  INNER JOIN person as person \
+      \  ON person.id = person_id \
+      \  WHERE game_id = ? \
+      \  ORDER BY created_at DESC \
+      \  LIMIT ?;"

@@ -22,6 +22,7 @@ import EventSource (ServerEvent(..), eventSourceAppTChan)
 import Network.HTTP.Types
   ( Status
   , status200
+  , created201
   , noContent204
   , status400
   , unauthorized401
@@ -69,16 +70,6 @@ import Auth
 import Database
 import qualified CouchDB
 import Types
-  ( Registration
-  , AuthenticationData
-  , PersonId(..)
-  , Person
-  , GameId(..)
-  , NewGame(..)
-  , AccessLevel(..)
-  , updatePresence
-  , PersonPresence(..)
-  )
 
 main :: IO ()
 main =
@@ -310,7 +301,41 @@ main =
               status noContent204
             _ ->
               status notFound404
-              
+
+  -- API: insert a new chat message
+  post "/games/:gameId/chat" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status forbidden403
+        Just _ -> do
+          newMessage <- jsonData
+          result <- liftIO $
+            insertChatMessage conn personId gameId newMessage
+          case result of
+            Nothing ->
+              status status500
+            Just chatMessage -> do
+              status created201
+              liftIO . atomically $
+                writeTChan chan ( BS8.pack . show $ gameId
+                                , sse_chatMessage [chatMessage])
+
+
+  -- API: get a chat log
+  get "/games/:gameId/chat" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status forbidden403
+        Just _ -> do
+          chatLog <- liftIO $ getChatLog conn gameId 50
+          json chatLog
+
 
 ------------------------------------------------------------
 -- Raw Endpoints
@@ -502,6 +527,13 @@ sse_playerPresence presenceList =
   , eventData = [fromEncoding (toEncodingList presenceList)]
   }
 
+sse_chatMessage :: [ChatMessage] -> ServerEvent
+sse_chatMessage chatMessages =
+  ServerEvent
+  { eventName = Just (fromByteString "chat-message")
+  , eventId = Nothing
+  , eventData = [fromEncoding (toEncodingList chatMessages)]
+  }
 
 pingChannel :: TChan (ByteString, ServerEvent) -> Int -> IO ()
 pingChannel chan seconds =

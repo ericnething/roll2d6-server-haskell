@@ -28,7 +28,6 @@ create type access_level as enum (
 
 create table person (
   id         serial       primary key,
-  -- uuid       uuid         not null default gen_random_uuid(),
   username   varchar      not null,
   email      varchar      not null unique,
   password   varchar      not null,
@@ -46,10 +45,8 @@ create trigger update_person_timestamp
 ------------------------------------------------------------
 
 create table game (
-  -- id         serial       primary key,
   id         uuid         primary key default gen_random_uuid(),
   title      varchar      not null,
-  -- person_id  integer      not null references person (id),
   created_at timestamptz  not null default now(),
   updated_at timestamptz  not null default now()
 );
@@ -63,7 +60,6 @@ create trigger update_game_timestamp
 ------------------------------------------------------------
 
 create table person_game_relation (
-  -- id         serial       primary key,
   game_id    uuid         not null references game (id),
   person_id  integer      not null references person (id),
   access     access_level not null default 'player',
@@ -74,5 +70,31 @@ create table person_game_relation (
 
 create trigger update_person_game_relation_timestamp
   before update on person_game_relation
+  for each row execute procedure update_timestamp_field();
+
+------------------------------------------------------------
+-- Chat and dice rolling messages
+------------------------------------------------------------
+
+create type chat_message_type as enum (
+  'chat_message',
+  'dice_roll'
+);
+
+create table chat_message (
+  game_id     uuid         not null references game (id),
+  person_id   integer      not null references person (id),
+  ctor        chat_message_type not null,
+  body        varchar,
+  dice_result jsonb,
+  created_at  timestamptz  not null default now(),
+  updated_at  timestamptz  not null default now(),
+  primary key (game_id, person_id, created_at),
+  constraint chat_message_sum_type
+      check (num_nulls(body, dice_result) = 1)
+);
+
+create trigger update_chat_message_timestamp
+  before update on chat_message
   for each row execute procedure update_timestamp_field();
 
