@@ -47,6 +47,7 @@ create trigger update_person_timestamp
 create table game (
   id         uuid         primary key default gen_random_uuid(),
   title      varchar      not null,
+  gameType   varchar      not null,
   created_at timestamptz  not null default now(),
   updated_at timestamptz  not null default now()
 );

@@ -59,15 +59,22 @@ getGamesForPersonId conn personId =
       \  WHERE rel.person_id = ? \
       \  ORDER BY game.created_at ASC;"
 
-createGameForPersonId :: Connection -> PersonId -> Text -> IO GameId
-createGameForPersonId conn personId title = do
-  [gameId] <- query conn sql (title, personId)
+createGameForPersonId :: Connection
+                      -> PersonId
+                      -> NewGame
+                      -> IO GameId
+createGameForPersonId conn personId newGame = do
+  [gameId] <- query conn sql
+              ( _newGameTitle newGame
+              , _newGameType newGame
+              , personId
+              )
   pure gameId
   where
     sql =
       "WITH new_game AS ( \
-      \  INSERT INTO game (title) \
-      \    VALUES (?) \
+      \  INSERT INTO game (title, gameType) \
+      \    VALUES (?, ?) \
       \    RETURNING id \
       \), rel AS ( \
       \  INSERT INTO person_game_relation \

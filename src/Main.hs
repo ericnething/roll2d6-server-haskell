@@ -144,20 +144,22 @@ main =
   post "/games" $ do
     checkAuth redisConn $ \personId -> do
       newGame <- jsonData
+      rawGameData <- body
 
       -- create a game entry in postgres
       gameId <- liftIO $
         createGameForPersonId conn
         personId
-        (_newGameTitle newGame)
+        newGame
 
       -- create database in couchdb
       mCouchStatus <- liftIO $
-        CouchDB.createDatabase gameId
+        CouchDB.createDatabase gameId rawGameData
       case mCouchStatus of
         Nothing ->
           status status500
-        Just _ ->
+        Just _ -> do
+          status created201
           json gameId
 
   -- API: get a list of all players in a game
@@ -169,17 +171,10 @@ main =
       Nothing ->
         status unauthorized401
       Just _ -> do
-        players <- liftIO $ listPeopleInGame conn gameId
-        mPresence <- liftIO $ atomically $ STMMap.focus
-          Focus.lookup
-          (BS8.pack . show $ gameId)
-          presenceMap
-        case mPresence of
-          Nothing ->
-            json players
-          Just presence ->
-            json $ map (updatePresence presence) players
-            
+        players <- liftIO $
+                   getUpdatedPlayerList conn gameId presenceMap
+        json players
+
 
   -- API: add a player to a game
   post "/games/:gameId/players" $
@@ -197,7 +192,8 @@ main =
               status status500 >>
               text "Could not add player to the game"
             Just _ -> do
-              players <- liftIO $ listPeopleInGame conn gameId
+              players <- liftIO $
+                   getUpdatedPlayerList conn gameId presenceMap
               liftIO . atomically $
                 writeTChan chan ( BS8.pack . show $ gameId
                                 , sse_playerList players)
@@ -238,7 +234,12 @@ main =
                 Nothing ->
                   status status500 >>
                   text "Could not add player to the game"
-                Just _ ->
+                Just _ -> do
+                  players <- liftIO $
+                    getUpdatedPlayerList conn gameId presenceMap
+                  liftIO . atomically $
+                    writeTChan chan ( BS8.pack . show $ gameId
+                                    , sse_playerList players)
                   json gameId
         _ ->
           status notFound404
@@ -248,23 +249,42 @@ main =
     checkAuth redisConn $ \personId -> do
       gameId <- param "gameId"
       playerId <- param "playerId"
+      let handler = do
+            mResult <- liftIO $
+              removePersonFromGame conn playerId gameId
+            case mResult of
+              Nothing ->
+                status status500 >>
+                text "Could not remove player from the game"
+              Just _ -> do
+                players <- liftIO $
+                   getUpdatedPlayerList conn gameId presenceMap
+                liftIO . atomically $
+                  writeTChan chan ( BS8.pack . show $ gameId
+                                  , sse_playerList players)
+                status status200
+
       mAccess <- liftIO $ verifyGameAccess conn personId gameId
       case mAccess of
         Nothing ->
+          -- not an authorized account
           status unauthorized401
+        Just Player ->
+          -- permission denied
+          status forbidden403
         Just _ -> do
-          mResult <- liftIO $
-            removePersonFromGame conn playerId gameId
-          case mResult of
+          mPlayerAccess <- liftIO $
+            verifyGameAccess conn playerId gameId
+          case mPlayerAccess of
             Nothing ->
-              status status500 >>
-              text "Could not remove player from the game"
-            Just _ -> do
-              players <- liftIO $ listPeopleInGame conn gameId
-              liftIO . atomically $
-                writeTChan chan ( BS8.pack . show $ gameId
-                                , sse_playerList players)
-              status status200
+              -- player not found
+              status notFound404
+            Just Owner ->
+              status forbidden403 >>
+              text "Game owner cannot be removed from game."
+            Just _ ->
+              handler
+
 
   -- API: ping the server
   post "/games/:gameId/ping" $ do
@@ -550,3 +570,20 @@ timeoutPresence chan presenceMap seconds =
   forever $
   threadDelay (seconds * 1000 * 1000)
   >> removeExpiredPresence chan presenceMap
+
+
+getUpdatedPlayerList :: Connection
+                     -> GameId
+                     -> STMMap.Map ByteString (Map PersonId UTCTime)
+                     -> IO [Person]
+getUpdatedPlayerList conn gameId presenceMap = do
+  players <- listPeopleInGame conn gameId
+  mPresence <- atomically $ STMMap.focus
+    Focus.lookup
+    (BS8.pack . show $ gameId)
+    presenceMap
+  case mPresence of
+    Nothing ->
+      pure players
+    Just presence ->
+      pure $ map (updatePresence presence) players

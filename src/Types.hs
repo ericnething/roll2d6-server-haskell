@@ -366,12 +366,14 @@ instance ToJSON Game where
 
 data NewGame = NewGame
   { _newGameTitle :: Text
+  , _newGameType :: Text
   } deriving (Show)
 
 instance FromJSON NewGame where
   parseJSON (Object v)
     = NewGame
       <$> v .: "title"
+      <*> v .: "gameType"
 
   parseJSON _ = empty
 
