@@ -357,6 +357,18 @@ main =
           json chatLog
 
 
+  -- API: get my player id
+  get "/games/:gameId/player-id" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status forbidden403
+        Just _ ->
+          json personId
+
+
 ------------------------------------------------------------
 -- Raw Endpoints
 ------------------------------------------------------------
