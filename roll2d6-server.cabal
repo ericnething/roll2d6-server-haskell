@@ -1,18 +1,18 @@
-name:                rpg-server
+name:                roll2d6-server
 version:             0.1.0.0
 -- synopsis:
 -- description:
 license:             AGPL-3.0
 license-file:        LICENSE
 author:              Eric Nething
-maintainer:          emnething@gmail.com
+maintainer:          eric@roll2d6.org
 copyright:           (C) 2018 Eric Nething
 category:            Application
 build-type:          Simple
 extra-source-files:  ChangeLog.md
 cabal-version:       >=1.10
 
-executable rpg-server
+executable roll2d6-server
   main-is:             Main.hs
   other-modules:       Types
                      , Database
