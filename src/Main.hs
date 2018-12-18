@@ -389,6 +389,54 @@ main =
           json personId
 
 
+  -- API: generate a new game sheet id
+  post "/games/:gameId/new-sheet-id" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          -- not an authorized account
+          status unauthorized401
+        Just Player ->
+          -- permission denied
+          status forbidden403
+        Just _ -> do
+          muuid <- liftIO $ generateNewSheetUUID conn gameId
+          case muuid of
+            Nothing ->
+              status status500
+            Just uuid -> do
+              status created201
+              json $ UUID.toText uuid
+
+
+  -- API: delete a game sheet id
+  delete "/games/:gameId/sheet-id/:sheetId" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      msheetId <- UUID.fromText <$> param "sheetId"
+      case msheetId of
+        Nothing -> do
+          status status400
+          text "Not a valid sheetId"
+        Just sheetId -> do
+          mAccess <- liftIO $ verifyGameAccess conn personId gameId
+          case mAccess of
+            Nothing ->
+              -- not an authorized account
+              status unauthorized401
+            Just Player ->
+              -- permission denied
+              status forbidden403
+            Just _ -> do
+              result <- liftIO $ deleteSheetUUID conn gameId sheetId
+              case result of
+                Nothing ->
+                  status status500
+                Just uuid ->
+                  json $ UUID.toText uuid
+
 ------------------------------------------------------------
 -- Raw Endpoints
 ------------------------------------------------------------

@@ -119,3 +119,13 @@ create trigger update_chat_message_timestamp
   before update on chat_message
   for each row execute procedure update_timestamp_field();
 
+
+------------------------------------------------------------
+-- Unique Sheet IDs
+------------------------------------------------------------
+
+create table game_sheet (
+  game_id     uuid         not null references game (id),
+  sheet_id    uuid         not null default gen_random_uuid(),
+  primary key (game_id, sheet_id)
+);

@@ -28,6 +28,8 @@ import Database.PostgreSQL.Simple
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Aeson as Json (encode)
+import qualified Data.UUID.Types as UUID
+import           Data.UUID.Types (UUID)
 
 getConnection :: IO Connection
 getConnection = connect $ ConnectInfo
@@ -222,3 +224,37 @@ getChatLog conn gameId limit = do
       \  WHERE game_id = ? \
       \  ORDER BY created_at DESC \
       \  LIMIT ?;"
+
+
+generateNewSheetUUID :: Connection -> GameId -> IO (Maybe UUID)
+generateNewSheetUUID conn gameId = do
+  result <- query conn sql (Only gameId)
+  pure $
+    case result of
+      [] ->
+        Nothing
+      (Only uuid):_ ->
+        Just uuid
+  where
+    sql =
+      "INSERT INTO game_sheet \
+      \ (game_id) \
+      \  VALUES (?) \
+      \  RETURNING sheet_id;"
+
+
+deleteSheetUUID :: Connection -> GameId -> UUID -> IO (Maybe UUID)
+deleteSheetUUID conn gameId sheetId = do
+  result <- query conn sql (gameId, sheetId)
+  pure $
+    case result of
+      [] ->
+        Nothing
+      (Only uuid):_ ->
+        Just uuid
+  where
+    sql =
+      "DELETE FROM game_sheet \
+      \  WHERE game_id = ? \
+      \  AND sheet_id = ? \
+      \  RETURNING sheet_id;"
