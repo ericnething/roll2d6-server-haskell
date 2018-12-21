@@ -182,6 +182,26 @@ main =
           status created201
           json gameId
 
+
+  -- API: update game title
+  post "/games/:gameId/title" $ do
+    checkAuth redisConn $ \personId -> do
+      gameId <- param "gameId"
+      title <- jsonData
+      mAccess <- liftIO $ verifyGameAccess conn personId gameId
+      case mAccess of
+        Nothing ->
+          status forbidden403
+        Just _ -> do
+          mResult <- liftIO $ updateGameTitle conn gameId title
+          case mResult of
+            Nothing ->
+              status status500 >>
+              text "Could not update game title"
+            Just _ -> do
+              status noContent204
+
+
   -- API: get a list of all players in a game
   get "/games/:gameId/players" $
     checkAuth redisConn $ \personId -> do
@@ -377,16 +397,16 @@ main =
           json chatLog
 
 
-  -- API: get my player id
-  get "/games/:gameId/player-id" $ do
+  -- API: get my player information
+  get "/games/:gameId/my-player-info" $ do
     checkAuth redisConn $ \personId -> do
       gameId <- param "gameId"
-      mAccess <- liftIO $ verifyGameAccess conn personId gameId
-      case mAccess of
+      mPlayerInfo <- liftIO $ getPlayerInfo conn personId gameId
+      case mPlayerInfo of
         Nothing ->
           status forbidden403
-        Just _ ->
-          json personId
+        Just playerInfo ->
+          json playerInfo
 
 
   -- API: generate a new game sheet id

@@ -258,3 +258,45 @@ deleteSheetUUID conn gameId sheetId = do
       \  WHERE game_id = ? \
       \  AND sheet_id = ? \
       \  RETURNING sheet_id;"
+
+
+getPlayerInfo :: Connection
+              -> PersonId
+              -> GameId
+              -> IO (Maybe Person)
+getPlayerInfo conn personId gameId = do
+  result <- query conn sql (gameId, personId)
+  pure $
+    case result of
+      [] ->
+        Nothing
+      person:_ ->
+        Just person
+  where
+    sql =
+      "SELECT person.id, person.username, rel.access \
+      \  FROM person_game_relation as rel \
+      \  INNER JOIN person \
+      \  ON person.id = rel.person_id \
+      \  WHERE rel.game_id = ? \
+      \  AND person.id = ?;"
+
+
+updateGameTitle :: Connection
+                -> GameId
+                -> Text
+                -> IO (Maybe Bool)
+updateGameTitle conn gameId title = do
+  result <- query conn sql (title, gameId)
+  pure $
+    case result of
+      [] ->
+        Nothing
+      (Only bool):_ ->
+        Just bool
+  where
+    sql =
+      "UPDATE game \
+      \  SET title = ? \
+      \  WHERE id = ? \
+      \  RETURNING true;"
