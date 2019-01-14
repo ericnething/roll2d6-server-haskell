@@ -39,7 +39,8 @@ import Network.HTTP.ReverseProxy
   , ProxyDest(..)
   )
 import Network.HTTP.Types
-  ( unauthorized401
+  ( noContent204
+  , unauthorized401
   , forbidden403
   , notFound404
   )
@@ -48,6 +49,8 @@ import qualified Data.Text as T
 import           Data.Text (Text)
 import qualified Data.ByteString as BS
 import           Data.ByteString as BS (ByteString)
+import qualified Data.ByteString.Lazy as LBS (toStrict)
+import           Data.Binary.Builder (toLazyByteString)
 import qualified Data.UUID.Types as UUID
 import           Data.UUID.Types (UUID)
 
@@ -56,6 +59,7 @@ import GHC.TypeLits
 import Network.Wai.Handler.Warp
 import Servant
 import Servant.Server.Experimental.Auth
+import Web.Cookie (SetCookie, renderSetCookie)
 
 import Auth
 import qualified Database as DB
@@ -75,19 +79,24 @@ type AuthAPI =
 
   :<|> "login"
       :> ReqBody '[JSON] AuthenticationData
-      :> Post '[JSON] PersonId
+      :> Post '[JSON] (Headers
+                       '[Header "Set-Cookie" SetCookie]
+                       PersonId)
 
-  :<|> "logout"
-      :> Post '[JSON] NoContent
+  -- :<|> AuthProtect "cookie-auth" :> "logout"
+      -- :> Post '[JSON] (Headers
+      --                  '[Header "Set-Cookie" SetCookie]
+      --                  NoContent)
 
-type GamesAPI = "games" :>
+type GamesAPI
   -- Get a list of all your games
-    Get '[JSON] [Game]
-
-    :<|> "games"
-    -- Create a new game
-    :> ReqBody '[JSON] NewGame
-        :> PostCreated '[JSON] GameId
+  = "games"
+      :> Get '[JSON] [Game]
+      
+  -- Create a new game
+  :<|> "games"
+      :> ReqBody '[JSON] NewGame
+      :> PostCreated '[JSON] GameId
 
 type InviteAPI =
   -- Use an invite to join a game
@@ -157,15 +166,18 @@ type RestAPI =
 
 type CouchProxy = AuthProtect "cookie-auth" :> "couchdb" :> Raw
 
+type LogoutAPI = AuthProtect "cookie-auth" :> "logout" :> Raw
+
 type API =
   "api" :> RestAPI
+  :<|> LogoutAPI
   :<|> CouchProxy
 
 --authServer :: ServerT AuthAPI App
 authServer
   =    registerAccount
   :<|> loginAccount
-  :<|> logoutAccount
+  -- :<|> logoutAccount
 
 --gamesServer :: ServerT GamesAPI App
 gamesServer personId
@@ -218,7 +230,7 @@ authContextProxy = Proxy
 server :: Config -> Server API
 server config =
   hoistServerWithContext api authContextProxy (nt config)
-  (restServer :<|> couchServer config)
+  (restServer :<|> logoutAccount config :<|> couchServer config)
   
 
 restServer :: ServerT RestAPI App
@@ -244,24 +256,40 @@ registerAccount reg = do
       Just personId -> pure personId
 
 -- Log in to a user account
-loginAccount :: AuthenticationData -> App PersonId
+loginAccount :: AuthenticationData
+             -> App (Headers '[Header "Set-Cookie" SetCookie]
+                     PersonId)
 loginAccount authData = do
     mPersonId <- runDB $ DB.verifyAuthentication authData
     case mPersonId of
       Nothing -> throwError err400
       Just personId -> do
-        createSession personId
-        pure personId
+        cookie <- createSession personId
+        pure . addHeader cookie $ personId
 
 -- Log out of a user account
-logoutAccount :: App NoContent
-logoutAccount = do
-    -- mSessionId <- getSessionId <$> request
-    -- case mSessionId of
-    --   Nothing -> throwError err404
-    --   Just sessionId -> do
-    --     deleteSession sessionId
-        pure NoContent
+-- logoutAccount :: PersonId
+--               -> App (Headers '[Header "Set-Cookie" SetCookie]
+--                       NoContent)
+-- logoutAccount personId = do
+--     mSessionId <- getSessionId <$> request
+--     case mSessionId of
+--       Nothing -> throwError err404
+--       Just sessionId -> do
+--         cookie <- deleteSession sessionId
+--         pure . addHeader cookie $ NoContent
+
+logoutAccount :: Config -> PersonId -> Tagged App Application
+logoutAccount config personId = Tagged $ \request respond -> do
+  let mSessionId = getSessionId request
+  case mSessionId of
+    Nothing -> respond $ responseLBS notFound404 [] ""
+    Just sessionId -> do
+      cookie <- LBS.toStrict . toLazyByteString . renderSetCookie
+                <$> deleteSession config sessionId
+      respond $
+        responseLBS noContent204 [("Set-Cookie", cookie)] ""
+
 
 -- Get a list of all games for a user account
 myGameList :: PersonId -> App [Game]

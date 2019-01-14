@@ -46,9 +46,6 @@ main = do
         , getEnv = env
         }
 
-      runApp
-        = run port
-        . setLogger env
-        $ app config
-
-  bracket (forkIO runApp) killThread (const $ pure ())
+  run port
+    . setLogger env
+    $ app config

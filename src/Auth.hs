@@ -32,7 +32,7 @@ where
 
 import Data.Monoid (mconcat, (<>))
 import Control.Monad (when, join)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 
 import Network.Wai
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
@@ -43,7 +43,11 @@ import Network.HTTP.Types
   , status400
   , status500
   )
-import Web.Cookie (parseCookies)
+import Web.Cookie
+  ( parseCookies
+  , defaultSetCookie
+  , SetCookie(..)
+  )
 import Servant
 import Servant.Server.Experimental.Auth
 
@@ -55,6 +59,8 @@ import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import           Data.ByteString.Builder (word8Hex, toLazyByteString)
 import           System.Entropy (getEntropy)
+
+import Data.Time.Clock (secondsToDiffTime)
 
 import Database (verifyGameAccess)
 import Types
@@ -95,21 +101,17 @@ authHandler config = mkAuthHandler handler
     throw401 msg = throwError $ err401 { errBody = msg }
     handler req = either throw401 (authenticate config expiration)
       (maybeToEither "Session cookie is missing" (getSessionId req))
-        
 
-setAuthCookie :: ByteString -> Integer -> App ()
-setAuthCookie sessionId exp = do pure ()
-  -- setHeader "Set-Cookie" (newAuthCookie sessionId exp)
-
-newAuthCookie :: ByteString -> Integer -> LT.Text
+newAuthCookie :: ByteString -> Integer -> SetCookie
 newAuthCookie sessionId ttl =
-  LT.intercalate "; "
-  [ "session=" <> (LT.fromStrict . T.decodeUtf8 $ sessionId)
-  , "HttpOnly"
-    -- , "Secure"
-  , "Max-Age=" <> (LT.pack . show $ ttl)
-  , "Path=/"
-  ]
+  defaultSetCookie
+  { setCookieName = "session"
+  , setCookieValue = sessionId
+  , setCookiePath = Just "/"
+  , setCookieMaxAge = Just (secondsToDiffTime ttl)
+  , setCookieHttpOnly = True
+  -- , setCookieSecure = True
+  }
 
 genSessionId :: IO ByteString
 genSessionId = fmap ("session:" <>) genRandomId
@@ -134,17 +136,17 @@ getSessionId req =
   $ parseCookies <$> lookup "Cookie" (requestHeaders req)
 
 
-createSession :: PersonId -> App ()
+createSession :: PersonId -> App SetCookie
 createSession personId = do
   sessionId <- liftIO $ genSessionId
   redis $ Redis.createSession sessionId personId expiration
-  setAuthCookie sessionId oneYear
+  pure $ newAuthCookie sessionId oneYear
 
 
-deleteSession :: ByteString -> App ()
-deleteSession sessionId = do
-  redis $ Redis.deleteSession sessionId
-  setAuthCookie "" 1
+deleteSession :: MonadIO m => Config -> ByteString -> m SetCookie
+deleteSession config sessionId = do
+  redisWithConfig config $ Redis.deleteSession sessionId
+  pure $ newAuthCookie "" 1
 
 
 createInvite :: GameId -> App InviteCode
