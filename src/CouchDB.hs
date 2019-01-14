@@ -27,15 +27,15 @@ where
 import Data.Aeson
 import Data.Default.Class
 import Network.HTTP.Req
-import Types (GameId)
+import Types (GameId, NewGame)
 import qualified Data.Text as T (pack)
 import qualified Data.ByteString.Lazy as LBS (ByteString)
 
 couchDomain = "localhost"
 couchPort = 5984
 
-createDatabase :: GameId -> LBS.ByteString -> IO (Maybe ())
-createDatabase gameId gameData =
+createDatabase :: GameId -> NewGame -> IO (Maybe ())
+createDatabase gameId newGame =
   runReq def $ do
   r <- req PUT
     (http couchDomain /: T.pack (show gameId))
@@ -51,7 +51,7 @@ createDatabase gameId gameData =
       runReq def $ do
       r2 <- req POST
         (http couchDomain /: T.pack (show gameId))
-        (ReqBodyLbs gameData)
+        (ReqBodyLbs (encode newGame))
         ignoreResponse
         (port couchPort
          <> header "Content-Type" "application/json")
@@ -62,3 +62,4 @@ createDatabase gameId gameData =
           pure Nothing
     _   ->
       pure Nothing
+

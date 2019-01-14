@@ -1,8 +1,9 @@
+cabal-version:       2.4
 name:                roll2d6-server
 version:             0.1.0.0
 -- synopsis:
 -- description:
-license:             AGPL-3.0
+license:             AGPL-3.0-only
 license-file:        LICENSE
 author:              Eric Nething
 maintainer:          eric@roll2d6.org
@@ -10,7 +11,6 @@ copyright:           (C) 2018 Eric Nething
 category:            Application
 build-type:          Simple
 extra-source-files:  ChangeLog.md
-cabal-version:       >=1.10
 
 executable roll2d6-server
   main-is:             Main.hs
@@ -18,10 +18,13 @@ executable roll2d6-server
                      , Database
                      , CouchDB
                      , Auth
-                     , EventSource
+                     , API
+                     , Config
+                     , Redis
   -- other-extensions:
-  build-depends:       base >=4.11 && <4.12
-                     , scotty
+  build-depends:       base ^>=4.12.0.0
+                     , servant-server
+                     , warp
                      , postgresql-simple
                      , aeson
                      , text
@@ -31,6 +34,7 @@ executable roll2d6-server
                      , http-types
                      , binary
                      , transformers
+                     , mtl
                      , hedis
                      , entropy
                      , bytestring
@@ -39,10 +43,10 @@ executable roll2d6-server
                      , http-reverse-proxy
                      , http-client
                      , uuid-types
-                     , stm
-                     , stm-containers
-                     , focus
                      , time
-                     , list-t
+                     , resource-pool
+                     , safe
+                     , http-api-data
+                     , cookie
   hs-source-dirs:      src
   default-language:    Haskell2010

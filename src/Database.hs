@@ -20,8 +20,32 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleContexts #-}
 
-module Database where
+module Database
+  ( PGQuery
+  , runDB
+  , runDBwithConfig
+  , createPerson
+  , verifyAuthentication
+  , getGamesForPersonId
+  , createGameForPersonId
+  , listPeopleInGame
+  , addPersonToGame
+  , removePersonFromGame
+  , verifyGameAccess
+  , insertChatMessage
+  , getChatLog
+  , generateNewSheetUUID
+  , deleteSheetUUID
+  , getPlayerInfo
+  , updateGameTitle
+  )
+where
 
 import Types
 import Database.PostgreSQL.Simple
@@ -31,17 +55,34 @@ import qualified Data.Aeson as Json (encode)
 import qualified Data.UUID.Types as UUID
 import           Data.UUID.Types (UUID)
 
-getConnection :: IO Connection
-getConnection = connect $ ConnectInfo
-  { connectHost     = "localhost"
-  , connectPort     = 5432
-  , connectUser     = "faterpg"
-  , connectPassword = "faterpg"
-  , connectDatabase = "faterpg"
-  }
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Reader.Class (MonadReader, asks)
+import Control.Monad.Trans.Reader (ReaderT(..))
 
-createPerson :: Connection -> Registration -> IO (Maybe PersonId)
-createPerson conn (Registration username email password) = do
+import Config (Config(..))
+import Data.Pool (withResource)
+
+
+newtype PGQuery a = PGQuery { unPGQuery :: Connection -> IO a }
+  deriving (Functor, Applicative, Monad) via (ReaderT Connection IO)
+
+runDB :: (MonadIO m, MonadReader Config m) => PGQuery a -> m a
+runDB q = do
+  pool <- asks getPGConnPool
+  liftIO (withResource pool (unPGQuery q))
+
+runDBwithConfig :: MonadIO m => Config -> PGQuery a -> m a
+runDBwithConfig config q = do
+  let pool = getPGConnPool config
+  liftIO (withResource pool (unPGQuery q))
+
+createPerson :: Registration -> PGQuery (Maybe PersonId)
+createPerson reg = PGQuery $ \conn -> do
+  let
+    username = _registrationUsername reg
+    email    = _registrationEmail reg
+    password = _registrationPassword reg
+
   mPersonId <- query conn sql (username, email, password)
   pure $
     case mPersonId of
@@ -53,10 +94,12 @@ createPerson conn (Registration username email password) = do
       \  VALUES (?, ?, crypt(?, gen_salt('bf', 8)))\
       \  RETURNING id;"
 
-verifyAuthentication :: Connection
-                     -> AuthenticationData
-                     -> IO (Maybe PersonId)
-verifyAuthentication conn (AuthenticationData email password) = do
+verifyAuthentication :: AuthenticationData -> PGQuery (Maybe PersonId)
+verifyAuthentication auth = PGQuery $ \conn -> do
+  let
+    email = _authEmail auth
+    password = _authPassword auth
+
   mAuthenticated <- query conn sql (email, password)
   pure $
     case mAuthenticated of
@@ -69,8 +112,8 @@ verifyAuthentication conn (AuthenticationData email password) = do
       \  WHERE email = ? \
       \  AND password = crypt(?, password);"
 
-getGamesForPersonId :: Connection -> PersonId -> IO [Game]
-getGamesForPersonId conn personId =
+getGamesForPersonId :: PersonId -> PGQuery [Game]
+getGamesForPersonId personId = PGQuery $ \conn ->
   query conn sql (Only personId)
   where
     sql =
@@ -81,11 +124,8 @@ getGamesForPersonId conn personId =
       \  WHERE rel.person_id = ? \
       \  ORDER BY game.created_at ASC;"
 
-createGameForPersonId :: Connection
-                      -> PersonId
-                      -> NewGame
-                      -> IO GameId
-createGameForPersonId conn personId newGame = do
+createGameForPersonId :: PersonId -> NewGame -> PGQuery GameId
+createGameForPersonId personId newGame = PGQuery $ \conn -> do
   [gameId] <- query conn sql
               ( _newGameTitle newGame
               , _newGameType newGame
@@ -106,8 +146,8 @@ createGameForPersonId conn personId newGame = do
       \SELECT id FROM new_game;"
 
 
-listPeopleInGame :: Connection -> GameId -> IO [Person]
-listPeopleInGame conn gameId =
+listPeopleInGame :: GameId -> PGQuery [Person]
+listPeopleInGame gameId = PGQuery $ \conn ->
   query conn sql (Only gameId)
   where
     sql =
@@ -119,11 +159,8 @@ listPeopleInGame conn gameId =
       \  ORDER BY rel.created_at ASC;"
 
 
-addPersonToGame :: Connection
-                -> PersonId
-                -> GameId
-                -> IO (Maybe Bool)
-addPersonToGame conn personId gameId = do
+addPersonToGame :: PersonId -> GameId -> PGQuery (Maybe Bool)
+addPersonToGame personId gameId = PGQuery $ \conn -> do
   result <- query conn sql (personId, gameId)
   pure $
     case result of
@@ -137,11 +174,8 @@ addPersonToGame conn personId gameId = do
       \  RETURNING true;"
 
 
-removePersonFromGame :: Connection
-                     -> PersonId
-                     -> GameId
-                     -> IO (Maybe Bool)
-removePersonFromGame conn personId gameId = do
+removePersonFromGame :: PersonId -> GameId -> PGQuery (Maybe Bool)
+removePersonFromGame personId gameId = PGQuery $ \conn -> do
   result <- query conn sql (personId, gameId)
   pure $
     case result of
@@ -155,11 +189,8 @@ removePersonFromGame conn personId gameId = do
       \  RETURNING true;"
 
 
-verifyGameAccess :: Connection
-                 -> PersonId
-                 -> GameId
-                 -> IO (Maybe AccessLevel)
-verifyGameAccess conn personId gameId = do
+verifyGameAccess :: PersonId -> GameId -> PGQuery (Maybe AccessLevel)
+verifyGameAccess personId gameId = PGQuery $ \conn -> do
   result <- query conn sql (personId, gameId)
   pure $
     case result of
@@ -173,12 +204,11 @@ verifyGameAccess conn personId gameId = do
       \  AND game_id = ?;"
 
 
-insertChatMessage :: Connection
-                  -> PersonId
+insertChatMessage :: PersonId
                   -> GameId
                   -> NewChatMessage
-                  -> IO (Maybe ChatMessage)
-insertChatMessage conn personId gameId message = do
+                  -> PGQuery (Maybe ChatMessage)
+insertChatMessage personId gameId message = PGQuery $ \conn -> do
   result <- case message of
     NewChatMessage body ->
       query conn (sql "body")
@@ -208,11 +238,8 @@ insertChatMessage conn personId gameId message = do
       \  ON p.id = m.person_id;"
 
 
-getChatLog :: Connection
-           -> GameId
-           -> Int64
-           -> IO [ChatMessage]
-getChatLog conn gameId limit = do
+getChatLog :: GameId -> Int64 -> PGQuery [ChatMessage]
+getChatLog gameId limit = PGQuery $ \conn -> do
   query conn sql (gameId, limit)
   where
     sql =
@@ -226,8 +253,8 @@ getChatLog conn gameId limit = do
       \  LIMIT ?;"
 
 
-generateNewSheetUUID :: Connection -> GameId -> IO (Maybe UUID)
-generateNewSheetUUID conn gameId = do
+generateNewSheetUUID :: GameId -> PGQuery (Maybe UUID)
+generateNewSheetUUID gameId = PGQuery $ \conn -> do
   result <- query conn sql (Only gameId)
   pure $
     case result of
@@ -243,8 +270,8 @@ generateNewSheetUUID conn gameId = do
       \  RETURNING sheet_id;"
 
 
-deleteSheetUUID :: Connection -> GameId -> UUID -> IO (Maybe UUID)
-deleteSheetUUID conn gameId sheetId = do
+deleteSheetUUID :: GameId -> UUID -> PGQuery (Maybe UUID)
+deleteSheetUUID gameId sheetId = PGQuery $ \conn -> do
   result <- query conn sql (gameId, sheetId)
   pure $
     case result of
@@ -260,11 +287,8 @@ deleteSheetUUID conn gameId sheetId = do
       \  RETURNING sheet_id;"
 
 
-getPlayerInfo :: Connection
-              -> PersonId
-              -> GameId
-              -> IO (Maybe Person)
-getPlayerInfo conn personId gameId = do
+getPlayerInfo :: PersonId -> GameId -> PGQuery (Maybe Person)
+getPlayerInfo personId gameId = PGQuery $ \conn -> do
   result <- query conn sql (gameId, personId)
   pure $
     case result of
@@ -282,11 +306,8 @@ getPlayerInfo conn personId gameId = do
       \  AND person.id = ?;"
 
 
-updateGameTitle :: Connection
-                -> GameId
-                -> Text
-                -> IO (Maybe Bool)
-updateGameTitle conn gameId title = do
+updateGameTitle :: GameId -> Text -> PGQuery (Maybe Bool)
+updateGameTitle gameId title = PGQuery $ \conn -> do
   result <- query conn sql (title, gameId)
   pure $
     case result of

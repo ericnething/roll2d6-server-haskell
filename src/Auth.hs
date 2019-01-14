@@ -19,14 +19,14 @@
 -- <https://www.gnu.org/licenses/>.
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Auth
-  ( checkAuth
-  , checkAuthWai
-  , createSession
+  ( createSession
   , deleteSession
   , getSessionId
   , createInvite
+  , authHandler
   )
 where
 
@@ -43,7 +43,9 @@ import Network.HTTP.Types
   , status400
   , status500
   )
-import Web.Scotty
+import Web.Cookie (parseCookies)
+import Servant
+import Servant.Server.Experimental.Auth
 
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.Encoding as T (encodeUtf8, decodeUtf8)
@@ -52,17 +54,19 @@ import qualified Data.ByteString as BS
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import           Data.ByteString.Builder (word8Hex, toLazyByteString)
-
-import           Database.PostgreSQL.Simple (Connection)
-import qualified Database.Redis as Redis
 import           System.Entropy (getEntropy)
 
 import Database (verifyGameAccess)
 import Types
-  ( PersonId(..)
+  ( App
+  , PersonId(..)
   , GameId(..)
   , AccessLevel
+  , InviteCode(..)
   )
+import Config (Config)
+import qualified Redis
+import           Redis (redis, redisWithConfig)
 
 expiration :: Integer
 expiration = minutes 20
@@ -76,48 +80,26 @@ minutes m = 60 * m
 oneYear :: Integer
 oneYear = 365 * (hours 24)
 
-checkAuth :: Redis.Connection
-          -> (PersonId -> ActionM ())
-          -> ActionM ()
-checkAuth redisConn handler = do
-  let notAuthorized = status unauthorized401 >> text ""
-  req <- request
-  case getSessionId req of
-    Nothing        -> notAuthorized
-    Just sessionId -> do
-      result <- liftIO $ authenticate redisConn sessionId
-      case result of
-        Nothing       -> notAuthorized
-        Just personId -> handler personId
+authenticate :: Config -> Integer -> ByteString -> Handler PersonId
+authenticate config exp sessionId = do
+  ePersonId <- redisWithConfig config $
+               Redis.lookupSession exp sessionId
+  case ePersonId of
+    Left e -> throwError $ err401 { errBody = e }
+    Right personId -> pure personId
 
-authenticate :: Redis.Connection
-             -> ByteString
-             -> IO (Maybe PersonId)
-authenticate redisConn sessionId = do
-  emPersonId <- liftIO $ Redis.runRedis redisConn $ do
-    session  <- Redis.get sessionId
-    ettl     <- Redis.ttl sessionId
-    let
-      extendTTL =
-        case ettl of
-          Left _ ->
-            False
-          Right ttl ->
-            ttl > 0 && ttl < expiration `div` 2
-    when extendTTL $
-      Redis.expire sessionId expiration >>
-      pure ()
-    pure session
-  pure $
-    case emPersonId of
-      Right (Just personId) ->
-        Just $ read (BS8.unpack personId)
-      _ ->
-        Nothing
+authHandler :: Config -> AuthHandler Request PersonId
+authHandler config = mkAuthHandler handler
+  where
+    maybeToEither e = maybe (Left e) Right
+    throw401 msg = throwError $ err401 { errBody = msg }
+    handler req = either throw401 (authenticate config expiration)
+      (maybeToEither "Session cookie is missing" (getSessionId req))
+        
 
-setAuthCookie :: ByteString -> Integer -> ActionM ()
-setAuthCookie sessionId ttl = do
-  setHeader "Set-Cookie" (newAuthCookie sessionId ttl)
+setAuthCookie :: ByteString -> Integer -> App ()
+setAuthCookie sessionId exp = do pure ()
+  -- setHeader "Set-Cookie" (newAuthCookie sessionId exp)
 
 newAuthCookie :: ByteString -> Integer -> LT.Text
 newAuthCookie sessionId ttl =
@@ -129,31 +111,8 @@ newAuthCookie sessionId ttl =
   , "Path=/"
   ]
 
-parseCookies :: ByteString -> [(ByteString, ByteString)]
-parseCookies =
-  map pairs . entries
-  where
-    entries = splitOn "; "
-    pairs =
-      fmap (BS.drop 1)
-      . BS.break (== (fromIntegral . fromEnum $ '='))
-
-splitOn :: ByteString -> ByteString -> [ByteString]
-splitOn sep s =
-  case split sep s of
-    (a, "") -> a : []
-    (a,  b) -> a : splitOn sep b
-  where
-    split sep s =
-      fmap
-      (BS.drop $ BS.length sep)
-      (BS.breakSubstring sep s)
-
 genSessionId :: IO ByteString
 genSessionId = fmap ("session:" <>) genRandomId
-
-genInviteId :: IO ByteString
-genInviteId = fmap ("invite:" <>) genRandomId
 
 genRandomId :: IO ByteString
 genRandomId = do
@@ -168,50 +127,29 @@ genRandomId = do
       . BS.foldr'
       ( \ byte acc -> word8Hex byte:acc ) []
 
-checkAuthWai :: Redis.Connection
-             -> Connection
-             -> GameId
-             -> Request
-             -> IO (Maybe (PersonId, AccessLevel))
-checkAuthWai redisConn conn gameId req = do
-  case getSessionId req of
-    Nothing -> pure Nothing
-    Just sessionId -> do
-      result <- authenticate redisConn sessionId
-      case result of
-        Nothing -> pure Nothing
-        Just personId -> do
-          mAccess <- verifyGameAccess conn personId gameId
-          pure $ fmap ((,) personId) mAccess
 
 getSessionId :: Request -> Maybe ByteString
 getSessionId req =
   maybe Nothing (lookup "session")
-  $ parseCookies
-  <$> lookup "Cookie" (requestHeaders req)
+  $ parseCookies <$> lookup "Cookie" (requestHeaders req)
 
 
-createSession :: Redis.Connection -> PersonId -> ActionM ()
-createSession redisConn personId = do
+createSession :: PersonId -> App ()
+createSession personId = do
   sessionId <- liftIO $ genSessionId
-  liftIO $ Redis.runRedis redisConn $ do
-    Redis.set sessionId (BS8.pack . show $ personId)
-    Redis.expire sessionId expiration
+  redis $ Redis.createSession sessionId personId expiration
   setAuthCookie sessionId oneYear
 
 
-deleteSession :: Redis.Connection -> ByteString -> ActionM ()
-deleteSession redisConn sessionId = do
-  liftIO $ Redis.runRedis redisConn $ do
-    Redis.del [ sessionId ]
+deleteSession :: ByteString -> App ()
+deleteSession sessionId = do
+  redis $ Redis.deleteSession sessionId
   setAuthCookie "" 1
 
 
-createInvite :: Redis.Connection -> GameId -> ActionM (Maybe ByteString)
-createInvite redisConn (GameId gameId) = do
+createInvite :: GameId -> App InviteCode
+createInvite gameId = do
   rawInviteId <- liftIO genRandomId
   let inviteId = "invite:" <> rawInviteId
-  emStatus <- liftIO $ Redis.runRedis redisConn $ do
-    Redis.set inviteId (BS8.pack . show $ gameId)
-    Redis.expire inviteId (hours 2)
-  pure (Just rawInviteId)
+  redis $ Redis.createInvite gameId inviteId (hours 2)
+  pure (InviteCode (T.decodeUtf8 rawInviteId))

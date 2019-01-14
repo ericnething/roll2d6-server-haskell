@@ -53,10 +53,11 @@ import Data.Int (Int64)
 import           Data.UUID.Types (UUID)
 import qualified Data.UUID.Types as UUID (fromText, toText)
 
-import Web.Scotty (Parsable(..))
 import GHC.Generics
 import Control.Applicative (empty, (<|>))
 import Data.Maybe (fromJust)
+
+import Web.HttpApiData (FromHttpApiData(..))
 
 import qualified Data.Map.Strict as Map (member)
 import           Data.Map.Strict (Map)
@@ -64,6 +65,13 @@ import           Data.Time (UTCTime)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 
 import Control.Exception (throw)
+
+import Config (Config)
+import Servant (Handler)
+import Control.Monad.Trans.Reader (ReaderT)
+
+
+type App = ReaderT Config Handler
 
 ------------------------------------------------------------
 -- Chat Message Type
@@ -272,7 +280,10 @@ instance FromJSON AuthenticationData where
 newtype PersonId = PersonId
   { unPersonId :: Int64
   } deriving newtype
-      (FromField, ToField, FromJSON, ToJSON, Parsable, Read, Eq, Ord)
+      (FromField, ToField, FromJSON, ToJSON, Read, Eq, Ord)
+
+instance FromHttpApiData PersonId where
+  parseUrlPiece = fmap PersonId . parseUrlPiece
 
 instance Show PersonId where
   show (PersonId id_) = show id_
@@ -339,9 +350,9 @@ instance FromRow GameId where
   fromRow = GameId
     <$> field
 
-instance Parsable GameId where
-  parseParam s =
-    case UUID.fromText (stripPrefix s) of
+instance FromHttpApiData GameId where
+  parseUrlPiece t =
+    case UUID.fromText (stripPrefix t) of
       Nothing ->
         Left "Failed to convert text into uuid."
       Just uuid ->
@@ -350,7 +361,6 @@ instance Parsable GameId where
       stripPrefix
         = T.drop 1
         . T.dropWhile (/= '_')
-        . LT.toStrict
 
 instance ToJSON GameId where
   toJSON (GameId uuid) = toJSON ("game_" <> (show uuid))
@@ -387,7 +397,7 @@ instance ToJSON Game where
 data NewGame = NewGame
   { _newGameTitle :: Text
   , _newGameType :: Text
-  } deriving (Show)
+  } deriving (Show, Generic)
 
 instance FromJSON NewGame where
   parseJSON (Object v)
@@ -396,4 +406,23 @@ instance FromJSON NewGame where
       <*> v .: "gameType"
 
   parseJSON _ = empty
+
+instance ToJSON NewGame where
+  toEncoding (NewGame title gameType)
+    = pairs
+      (  "title"    .= title
+      <> "gameType" .= gameType
+      )
+
+------------------------------------------------------------
+-- Invite Code
+------------------------------------------------------------
+
+newtype InviteCode = InviteCode
+  { unInviteCode :: Text
+  } deriving newtype
+      (Show, FromJSON, ToJSON, Read, Eq, Ord)
+
+instance FromHttpApiData InviteCode where
+  parseUrlPiece = fmap InviteCode . parseUrlPiece
 
