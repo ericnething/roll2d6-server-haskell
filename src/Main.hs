@@ -23,7 +23,8 @@
 
 module Main where
 
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, killThread)
+import Control.Exception (bracket)
 import Network.Wai.Handler.Warp (run)
 
 import API (app)

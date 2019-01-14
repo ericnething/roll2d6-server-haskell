@@ -118,24 +118,29 @@ type GameAPI = "games" :> Capture "gameId" GameId :>
   )
 
 type PlayerAPI = "games" :> Capture "gameId" GameId :>
-  ("players" :>
-    ( -- Get a list of all players in the game
-      Get '[JSON] [Person]
+  (  -- Get a list of all players in the game
+    "players"
+        :> Get '[JSON] [Person]
     
-      -- Add a player to the game
-      :<|> ReqBody '[JSON] PersonId :> PostNoContent '[JSON] NoContent
-
-      -- Remove a player from a game
-      :<|> Capture "playerId" PersonId :> Delete '[JSON] NoContent
-    )
+    -- Add a player to the game
+    :<|> "players"
+        :> ReqBody '[JSON] PersonId
+        :> PostNoContent '[JSON] NoContent
+  
+    -- Remove a player from a game
+    :<|> "players"
+        :> Capture "playerId" PersonId
+        :> Delete '[JSON] NoContent
 
     -- Get my player information
-    :<|> "my-player-info" :> Get '[JSON] Person
+    :<|> "my-player-info"
+        :> Get '[JSON] Person
   )
 
 type ChatAPI = "games" :> Capture "gameId" GameId :> "chat" :>
   (-- Insert a new chat message
-    PostCreated '[JSON] NoContent
+    ReqBody '[JSON] NewChatMessage
+        :> PostCreated '[JSON] NoContent
   
     -- Get a chat log
     :<|> Get '[JSON] [ChatMessage]
@@ -144,20 +149,17 @@ type ChatAPI = "games" :> Capture "gameId" GameId :> "chat" :>
 
 type RestAPI =
   AuthAPI
-  :<|> AuthProtect "cookie-auth" :>
-  (      GamesAPI
-    :<|> GameAPI
-    :<|> PlayerAPI
-    :<|> ChatAPI
-    :<|> InviteAPI
-  )
+  :<|> AuthProtect "cookie-auth" :> GamesAPI
+  :<|> AuthProtect "cookie-auth" :> GameAPI
+  :<|> AuthProtect "cookie-auth" :> PlayerAPI
+  :<|> AuthProtect "cookie-auth" :> ChatAPI
+  :<|> AuthProtect "cookie-auth" :> InviteAPI
 
-type API = "api" :>
-  (RestAPI
-  
-    -- CouchDB reverse proxy
-    :<|> AuthProtect "cookie-auth" :> "couchdb" :> Raw
-  )
+type CouchProxy = AuthProtect "cookie-auth" :> "couchdb" :> Raw
+
+type API =
+  "api" :> RestAPI
+  :<|> CouchProxy
 
 --authServer :: ServerT AuthAPI App
 authServer
@@ -189,12 +191,15 @@ chatServer personId gameId
   :<|> getChatLog personId gameId
 
 --inviteServer :: GameId -> ServerT InviteAPI App
-inviteServer personId gameId
-  =    createGameInvite personId gameId
-  :<|> useGameInvite personId
+inviteServer personId
+  =    useGameInvite personId
+  :<|> createGameInvite personId
 
 api :: Proxy API
 api = Proxy
+
+restApi :: Proxy RestAPI
+restApi = Proxy
 
 nt :: Config -> App a -> Handler a
 nt s x = runReaderT x s
@@ -210,17 +215,25 @@ authContext config = authHandler config :. EmptyContext
 authContextProxy :: Proxy '[AuthHandler Request PersonId]
 authContextProxy = Proxy
 
---server :: ServerT API App
+server :: Config -> Server API
 server config =
   hoistServerWithContext api authContextProxy (nt config)
-  (      authServer
-    :<|> gamesServer
-    :<|> gameServer
-    :<|> playerServer
-    :<|> chatServer
-    :<|> inviteServer
-    :<|> Tagged (couchProxy config)
-  )
+  (restServer :<|> couchServer config)
+  
+
+restServer :: ServerT RestAPI App
+restServer
+  =    authServer
+  :<|> gamesServer
+  :<|> gameServer
+  :<|> playerServer
+  :<|> chatServer
+  :<|> inviteServer
+    
+
+couchServer :: Config -> PersonId -> Tagged App Application
+couchServer config personId =
+  Tagged (couchProxy config personId)
 
 -- Register a user account
 registerAccount :: Registration -> App PersonId
@@ -325,8 +338,7 @@ useGameInvite myId inviteId = do
               players <- runDB $ DB.listPeopleInGame gameId
               -- TODO: Send updated player list message
               pure gameId
-        _ ->
-          throwError err404
+    _ -> throwError err404
 
 -- Remove a player from a game
 removePlayer :: PersonId -> GameId -> PersonId -> App NoContent
