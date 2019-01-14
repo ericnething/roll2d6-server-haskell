@@ -7,7 +7,7 @@ license:             AGPL-3.0-only
 license-file:        LICENSE
 author:              Eric Nething
 maintainer:          eric@roll2d6.org
-copyright:           (C) 2018 Eric Nething
+copyright:           (C) 2018-2019 Eric Nething
 category:            Application
 build-type:          Simple
 extra-source-files:  ChangeLog.md
@@ -38,6 +38,8 @@ executable roll2d6-server
                      , hedis
                      , entropy
                      , bytestring
+                     , base64-bytestring
+                     , base16-bytestring
                      , req
                      , data-default-class
                      , http-reverse-proxy

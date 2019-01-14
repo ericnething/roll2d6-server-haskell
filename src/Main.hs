@@ -19,17 +19,13 @@
 -- <https://www.gnu.org/licenses/>.
 
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
-import Control.Concurrent (forkIO, killThread)
-import Control.Exception (bracket)
 import Network.Wai.Handler.Warp (run)
 
 import API (app)
 import Config
-import Database
 
 main :: IO ()
 main = do

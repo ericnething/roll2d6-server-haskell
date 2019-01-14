@@ -109,7 +109,6 @@ deleteSession :: ByteString -> RedisQuery ()
 deleteSession sessionId = RedisQuery $ \conn -> do
   runRedis conn $ do
     del [ sessionId ]
-  -- setAuthCookie "" 1
   pure ()
 
 

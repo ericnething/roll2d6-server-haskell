@@ -56,8 +56,8 @@ import qualified Data.Text.Encoding as T (encodeUtf8, decodeUtf8)
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
 import           Data.ByteString (ByteString)
-import qualified Data.ByteString.Lazy as LBS
-import           Data.ByteString.Builder (word8Hex, toLazyByteString)
+import qualified Data.ByteString.Base64 as Base64 (encode)
+import qualified Data.ByteString.Base16 as Base16 (encode)
 import           System.Entropy (getEntropy)
 
 import Data.Time.Clock (secondsToDiffTime)
@@ -114,21 +114,13 @@ newAuthCookie sessionId ttl =
   }
 
 genSessionId :: IO ByteString
-genSessionId = fmap ("session:" <>) genRandomId
+genSessionId = fmap ("session:" <>) genRandom64
 
-genRandomId :: IO ByteString
-genRandomId = do
-  randBytes <- getEntropy 32
-  return $ prettyPrint randBytes
-  where
-    prettyPrint :: ByteString -> ByteString
-    prettyPrint
-      = LBS.toStrict
-      . toLazyByteString
-      . mconcat
-      . BS.foldr'
-      ( \ byte acc -> word8Hex byte:acc ) []
+genRandom16 :: IO ByteString
+genRandom16 = Base16.encode <$> getEntropy 16
 
+genRandom64 :: IO ByteString
+genRandom64 = Base64.encode <$> getEntropy 64
 
 getSessionId :: Request -> Maybe ByteString
 getSessionId req =
@@ -151,7 +143,7 @@ deleteSession config sessionId = do
 
 createInvite :: GameId -> App InviteCode
 createInvite gameId = do
-  rawInviteId <- liftIO genRandomId
+  rawInviteId <- liftIO genRandom16
   let inviteId = "invite:" <> rawInviteId
   redis $ Redis.createInvite gameId inviteId (hours 2)
   pure (InviteCode (T.decodeUtf8 rawInviteId))
