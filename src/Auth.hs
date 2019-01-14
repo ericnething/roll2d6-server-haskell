@@ -30,44 +30,35 @@ module Auth
   )
 where
 
-import Data.Monoid (mconcat, (<>))
-import Control.Monad (when, join)
+import Data.Monoid ((<>))
 import Control.Monad.IO.Class (MonadIO, liftIO)
 
-import Network.Wai
-import Network.Wai.Middleware.RequestLogger (logStdoutDev)
-import Network.HTTP.Types
-  ( unauthorized401
-  , Status
-  , status200
-  , status400
-  , status500
-  )
+import Network.Wai (Request, requestHeaders)
 import Web.Cookie
   ( parseCookies
   , defaultSetCookie
   , SetCookie(..)
   )
 import Servant
+  ( Handler
+  , ServantErr(..)
+  , throwError
+  , err401
+  )
 import Servant.Server.Experimental.Auth
-
-import qualified Data.Text.Lazy as LT
-import qualified Data.Text.Encoding as T (encodeUtf8, decodeUtf8)
-import qualified Data.ByteString.Char8 as BS8
-import qualified Data.ByteString as BS
+  ( AuthHandler
+  , mkAuthHandler
+  )
+import qualified Data.Text.Encoding as T (decodeUtf8)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Base64 as Base64 (encode)
 import qualified Data.ByteString.Base16 as Base16 (encode)
 import           System.Entropy (getEntropy)
-
 import Data.Time.Clock (secondsToDiffTime)
-
-import Database (verifyGameAccess)
 import Types
   ( App
   , PersonId(..)
   , GameId(..)
-  , AccessLevel
   , InviteCode(..)
   )
 import Config (Config)
