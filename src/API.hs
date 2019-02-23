@@ -70,148 +70,31 @@ import Config (Config(..))
 import qualified Redis
 import           Redis (redis)
 
-type instance AuthServerData (AuthProtect "cookie-auth") = PersonId
+type instance AuthServerData (AuthProtect "cookie-auth") = PersonId  
 
-type AuthAPI =
-  "register"
-      :> ReqBody '[JSON] Registration
-      :> PostCreated '[JSON] PersonId
-
-  :<|> "login"
-      :> ReqBody '[JSON] AuthenticationData
-      :> Post '[JSON] (Headers
-                       '[Header "Set-Cookie" SetCookie]
-                       PersonId)
-
-  -- :<|> AuthProtect "cookie-auth" :> "logout"
-      -- :> Post '[JSON] (Headers
-      --                  '[Header "Set-Cookie" SetCookie]
-      --                  NoContent)
-
-type GamesAPI
-  -- Get a list of all your games
-  = "games"
-      :> Get '[JSON] [Game]
-      
-  -- Create a new game
-  :<|> "games"
-      :> ReqBody '[JSON] NewGame
-      :> PostCreated '[JSON] GameId
-
-type InviteAPI =
-  -- Use an invite to join a game
-  "invite"
-      :> Capture "inviteCode" InviteCode
-      :> Post '[JSON] GameId
-
-  -- Create an invite code for your game
-  :<|> "invite" :> "games"
-      :> Capture "gameId" GameId
-      :> PutCreated '[JSON] InviteCode
-
-
-type GameAPI = "games" :> Capture "gameId" GameId :>
-  (-- Update the game title
-    "title"
-        :> ReqBody '[JSON] Text
-        :> PostNoContent '[JSON] NoContent
-    
-    -- Generate a new game sheet uuid
-    :<|> "new-sheet-id"
-        :> PostCreated '[JSON] UUID
-
-    -- Delete a game sheet uuid
-    :<|> "sheet-id"
-        :> Capture "sheetId" UUID
-        :> Delete '[JSON] UUID
+type API
+  = "api" :>
+  (      RegisterAccount
+    :<|> LoginAccount
+    :<|> GetGames
+    :<|> CreateGame
+    :<|> AcceptGameInvite
+    :<|> CreateGameInvite
+    :<|> UpdateGameTitle
+    :<|> CreateNewSheetId
+    :<|> DeleteSheetId
+    :<|> GetPlayers
+    :<|> AddPlayer
+    :<|> RemovePlayer
+    :<|> GetMyPlayerInfo
+    :<|> InsertChatMessage
+    :<|> GetChatLog
+    :<|> LogoutAccount
+    :<|> CouchProxy
   )
-
-type PlayerAPI = "games" :> Capture "gameId" GameId :>
-  (  -- Get a list of all players in the game
-    "players"
-        :> Get '[JSON] [Person]
-    
-    -- Add a player to the game
-    :<|> "players"
-        :> ReqBody '[JSON] PersonId
-        :> PostNoContent '[JSON] NoContent
-  
-    -- Remove a player from a game
-    :<|> "players"
-        :> Capture "playerId" PersonId
-        :> Delete '[JSON] NoContent
-
-    -- Get my player information
-    :<|> "my-player-info"
-        :> Get '[JSON] Person
-  )
-
-type ChatAPI = "games" :> Capture "gameId" GameId :> "chat" :>
-  (-- Insert a new chat message
-    ReqBody '[JSON] NewChatMessage
-        :> PostCreated '[JSON] NoContent
-  
-    -- Get a chat log
-    :<|> Get '[JSON] [ChatMessage]
-  )
-
-
-type RestAPI =
-  AuthAPI
-  :<|> AuthProtect "cookie-auth" :> GamesAPI
-  :<|> AuthProtect "cookie-auth" :> GameAPI
-  :<|> AuthProtect "cookie-auth" :> PlayerAPI
-  :<|> AuthProtect "cookie-auth" :> ChatAPI
-  :<|> AuthProtect "cookie-auth" :> InviteAPI
-
-type CouchProxy = AuthProtect "cookie-auth" :> "couchdb" :> Raw
-
-type LogoutAPI = AuthProtect "cookie-auth" :> "logout" :> Raw
-
-type API =
-  "api" :> RestAPI
-  :<|> LogoutAPI
-  :<|> CouchProxy
-
---authServer :: ServerT AuthAPI App
-authServer
-  =    registerAccount
-  :<|> loginAccount
-  -- :<|> logoutAccount
-
---gamesServer :: ServerT GamesAPI App
-gamesServer personId
-  =    myGameList personId
-  :<|> createNewGame personId
-
---gameServer :: ServerT GameAPI App
-gameServer personId gameId
-  =    updateGameTitle personId gameId
-  :<|> newGameSheetId personId gameId
-  :<|> deleteGameSheetId personId gameId
-
---playerServer :: GameId -> ServerT PlayerAPI App
-playerServer personId gameId
-  =    getPlayers personId gameId
-  :<|> addPlayer personId gameId
-  :<|> removePlayer personId gameId
-  :<|> getMyPlayerInfo personId gameId
-
---chatServer :: GameId -> ServerT ChatAPI App
-chatServer personId gameId
-  =    newChatMessage personId gameId
-  :<|> getChatLog personId gameId
-
---inviteServer :: GameId -> ServerT InviteAPI App
-inviteServer personId
-  =    useGameInvite personId
-  :<|> createGameInvite personId
 
 api :: Proxy API
 api = Proxy
-
-restApi :: Proxy RestAPI
-restApi = Proxy
 
 nt :: Config -> App a -> Handler a
 nt s x = runReaderT x s
@@ -230,24 +113,41 @@ authContextProxy = Proxy
 server :: Config -> Server API
 server config =
   hoistServerWithContext api authContextProxy (nt config)
-  (restServer :<|> logoutAccount config :<|> couchServer config)
-  
+  (      registerAccount
+    :<|> loginAccount
+    :<|> myGameList
+    :<|> createNewGame
+    :<|> useGameInvite
+    :<|> createGameInvite
+    :<|> updateGameTitle
+    :<|> createNewGameSheetId
+    :<|> deleteGameSheetId
+    :<|> getPlayers
+    :<|> addPlayer
+    :<|> removePlayer
+    :<|> getMyPlayerInfo
+    :<|> newChatMessage
+    :<|> getChatLog
+    :<|> logoutAccount config
+    :<|> couchServer config
+  )
 
-restServer :: ServerT RestAPI App
-restServer
-  =    authServer
-  :<|> gamesServer
-  :<|> gameServer
-  :<|> playerServer
-  :<|> chatServer
-  :<|> inviteServer
-    
+
+type CouchProxy =
+  AuthProtect "cookie-auth"
+  :> "couchdb" :> Raw
 
 couchServer :: Config -> PersonId -> Tagged App Application
 couchServer config personId =
   Tagged (couchProxy config personId)
 
+
 -- Register a user account
+type RegisterAccount =
+  "register"
+  :> ReqBody '[JSON] Registration
+  :> PostCreated '[JSON] PersonId
+
 registerAccount :: Registration -> App PersonId
 registerAccount reg = do
     mPersonId <- runDB $ DB.createPerson reg
@@ -256,6 +156,11 @@ registerAccount reg = do
       Just personId -> pure personId
 
 -- Log in to a user account
+type LoginAccount =
+  "login"
+  :> ReqBody '[JSON] AuthenticationData
+  :> Post '[JSON] (Headers '[Header "Set-Cookie" SetCookie] PersonId)
+
 loginAccount :: AuthenticationData
              -> App (Headers '[Header "Set-Cookie" SetCookie]
                      PersonId)
@@ -267,17 +172,10 @@ loginAccount authData = do
         cookie <- createSession personId
         pure . addHeader cookie $ personId
 
--- Log out of a user account
--- logoutAccount :: PersonId
---               -> App (Headers '[Header "Set-Cookie" SetCookie]
---                       NoContent)
--- logoutAccount personId = do
---     mSessionId <- getSessionId <$> request
---     case mSessionId of
---       Nothing -> throwError err404
---       Just sessionId -> do
---         cookie <- deleteSession sessionId
---         pure . addHeader cookie $ NoContent
+
+type LogoutAccount =
+  AuthProtect "cookie-auth"
+  :> "logout" :> Raw
 
 logoutAccount :: Config -> PersonId -> Tagged App Application
 logoutAccount config personId = Tagged $ \request respond -> do
@@ -291,12 +189,24 @@ logoutAccount config personId = Tagged $ \request respond -> do
         responseLBS noContent204 [("Set-Cookie", cookie)] ""
 
 
--- Get a list of all games for a user account
+-- Get a list of all your games
+type GetGames =
+  AuthProtect "cookie-auth"
+  :> "games"
+  :> Get '[JSON] [Game]
+
 myGameList :: PersonId -> App [Game]
 myGameList myId =
   runDB $ DB.getGamesForPersonId myId
 
+
 -- Create a new game
+type CreateGame =
+  AuthProtect "cookie-auth"
+  :> "games"
+  :> ReqBody '[JSON] NewGame
+  :> PostCreated '[JSON] GameId
+
 createNewGame :: PersonId -> NewGame -> App GameId
 createNewGame myId newGame = do
   -- create a game entry in postgres
@@ -311,7 +221,14 @@ createNewGame myId newGame = do
     Just _ -> do
       pure gameId
 
+
 -- Update game title
+type UpdateGameTitle =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "title"
+  :> ReqBody '[JSON] Text
+  :> PostNoContent '[JSON] NoContent
+
 updateGameTitle :: PersonId -> GameId -> Text -> App NoContent
 updateGameTitle myId gameId title = do
   verifyGameAccess myId gameId $ \access -> do
@@ -323,6 +240,11 @@ updateGameTitle myId gameId title = do
 
 
 -- Get a list of all players in a game
+type GetPlayers =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "players"
+  :> Get '[JSON] [Person]
+
 getPlayers :: PersonId -> GameId -> App [Person]
 getPlayers myId gameId = do
   verifyGameAccess myId gameId $ \access -> do
@@ -330,6 +252,12 @@ getPlayers myId gameId = do
 
 
 -- Add a player to a game
+type AddPlayer =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "players"
+  :> ReqBody '[JSON] PersonId
+  :> PostNoContent '[JSON] NoContent
+
 addPlayer :: PersonId -> GameId -> PersonId -> App NoContent
 addPlayer myId gameId newPlayerId = do
   verifyGameAccess myId gameId $ \access -> do
@@ -342,13 +270,27 @@ addPlayer myId gameId newPlayerId = do
         -- TODO: Send updated player list message
         pure NoContent
 
--- Create an invite to a game
+
+-- Create an invite code for your game
+type CreateGameInvite =
+  AuthProtect "cookie-auth"
+  :> "invite" :> "games"
+  :> Capture "gameId" GameId
+  :> PutCreated '[JSON] InviteCode
+
 createGameInvite :: PersonId -> GameId -> App InviteCode
 createGameInvite myId gameId = do
   verifyGameAccess myId gameId $ \access -> do
     createInvite gameId
 
+
 -- Use an invite to join a game
+type AcceptGameInvite =
+  AuthProtect "cookie-auth"
+  :> "invite"
+  :> Capture "inviteCode" InviteCode
+  :> Post '[JSON] GameId
+
 useGameInvite :: PersonId -> InviteCode -> App GameId
 useGameInvite myId inviteId = do
   emGameId <- redis $ Redis.lookupGameInvite inviteId
@@ -368,7 +310,14 @@ useGameInvite myId inviteId = do
               pure gameId
     _ -> throwError err404
 
+
 -- Remove a player from a game
+type RemovePlayer =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "players"
+  :> Capture "playerId" PersonId
+  :> Delete '[JSON] NoContent
+
 removePlayer :: PersonId -> GameId -> PersonId -> App NoContent
 removePlayer myId gameId removedPlayerId = do
   let handler = do
@@ -400,6 +349,12 @@ removePlayer myId gameId removedPlayerId = do
 
 
 -- Insert a new chat message
+type InsertChatMessage =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "chat"
+  :> ReqBody '[JSON] NewChatMessage
+  :> PostCreated '[JSON] NoContent
+
 newChatMessage :: PersonId
                -> GameId
                -> NewChatMessage
@@ -415,6 +370,11 @@ newChatMessage myId gameId newMessage = do
 
 
 -- Get a chat log
+type GetChatLog =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "chat"
+  :> Get '[JSON] [ChatMessage]
+
 getChatLog :: PersonId -> GameId -> App [ChatMessage]
 getChatLog myId gameId = do
   verifyGameAccess myId gameId $ \access -> do
@@ -422,6 +382,11 @@ getChatLog myId gameId = do
 
 
 -- Get my player information
+type GetMyPlayerInfo =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "my-player-info"
+  :> Get '[JSON] Person
+
 getMyPlayerInfo :: PersonId -> GameId -> App Person
 getMyPlayerInfo myId gameId = do
   mPlayerInfo <- runDB $ DB.getPlayerInfo myId gameId
@@ -431,8 +396,13 @@ getMyPlayerInfo myId gameId = do
 
 
 -- Generate a new game sheet id
-newGameSheetId :: PersonId -> GameId -> App UUID
-newGameSheetId myId gameId = do
+type CreateNewSheetId =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "new-sheet-id"
+  :> PostCreated '[JSON] UUID
+
+createNewGameSheetId :: PersonId -> GameId -> App UUID
+createNewGameSheetId myId gameId = do
   verifyGameAccess myId gameId $ \access -> do
     case access of
       Player ->
@@ -446,6 +416,12 @@ newGameSheetId myId gameId = do
 
 
 -- Delete a game sheet id
+type DeleteSheetId =
+  AuthProtect "cookie-auth"
+  :> "games" :> Capture "gameId" GameId :> "sheet-id"
+  :> Capture "sheetId" UUID
+  :> Delete '[JSON] UUID
+
 deleteGameSheetId :: PersonId -> GameId -> UUID -> App UUID
 deleteGameSheetId myId gameId sheetId = do
   verifyGameAccess myId gameId $ \access -> do

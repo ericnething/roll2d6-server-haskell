@@ -1,22 +1,22 @@
--- Roll2d6 Virtual Tabletop Project
---
--- Copyright (C) 2018-2019 Eric Nething <eric@roll2d6.org>
---
--- This program is free software: you can redistribute it
--- and/or modify it under the terms of the GNU Affero
--- General Public License as published by the Free Software
--- Foundation, either version 3 of the License, or (at your
--- option) any later version.
---
--- This program is distributed in the hope that it will be
--- useful, but WITHOUT ANY WARRANTY; without even the
--- implied warranty of MERCHANTABILITY or FITNESS FOR A
--- PARTICULAR PURPOSE.  See the GNU Affero General Public
--- License for more details.
---
--- You should have received a copy of the GNU Affero General
--- Public License along with this program. If not, see
--- <https://www.gnu.org/licenses/>.
+{-
+Roll2d6 Virtual Tabletop Project
+
+Copyright (C) 2018-2019 Eric Nething <eric@roll2d6.org>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public
+License along with this program. If not, see
+<https://www.gnu.org/licenses/>.
+-}
 
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -24,7 +24,11 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Database
   ( PGQuery
@@ -47,85 +51,116 @@ module Database
   )
 where
 
+import Arango
 import Types
-import Database.PostgreSQL.Simple
 import Data.Int (Int64)
 import Data.Text (Text)
+import Data.Time.Clock (getCurrentTime)
+
 import qualified Data.Aeson as Json (encode)
 import qualified Data.UUID.Types as UUID
 import           Data.UUID.Types (UUID)
+import qualified Data.UUID.V4 as UUID (nextRandom)
+import qualified Crypto.KDF.BCrypt as BCrypt
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader.Class (MonadReader, asks)
 import Control.Monad.Trans.Reader (ReaderT(..))
 
 import Config (Config(..))
-import Data.Pool (withResource)
 
 
-newtype PGQuery a = PGQuery { unPGQuery :: Connection -> IO a }
-  deriving (Functor, Applicative, Monad) via (ReaderT Connection IO)
+-- runDB :: (MonadIO m, MonadReader Config m) => PGQuery a -> m a
+-- runDB q = do
+--   pool <- asks getPGConnPool
+--   liftIO (withResource pool (unPGQuery q))
 
-runDB :: (MonadIO m, MonadReader Config m) => PGQuery a -> m a
-runDB q = do
-  pool <- asks getPGConnPool
-  liftIO (withResource pool (unPGQuery q))
 
-runDBwithConfig :: MonadIO m => Config -> PGQuery a -> m a
-runDBwithConfig config q = do
-  let pool = getPGConnPool config
-  liftIO (withResource pool (unPGQuery q))
+-- runDBwithConfig :: MonadIO m => Config -> PGQuery a -> m a
+-- runDBwithConfig config q = do
+--   let pool = getPGConnPool config
+--   liftIO (withResource pool (unPGQuery q))
 
-createPerson :: Registration -> PGQuery (Maybe PersonId)
-createPerson reg = PGQuery $ \conn -> do
-  let
-    username = _registrationUsername reg
-    email    = _registrationEmail reg
-    password = _registrationPassword reg
 
-  mPersonId <- query conn sql (username, email, password)
-  pure $
-    case mPersonId of
-      [] -> Nothing
-      personId:_ -> Just personId
+createPerson :: Registration -> ArangoConfig -> IO (Maybe PersonId)
+createPerson reg config = do
+  exists <- run config doesPersonExistQuery
+  case exists of
+    _:_ -> pure Nothing
+    [] -> do
+      now <- getCurrentTime
+      passwordHash <- BCrypt.hashPassword 12 (_registrationPassword reg)
+      [personId] <- createAuthQuery
+      createPersonQuery personId
+      pure personId
   where
-    sql =
-      "INSERT INTO person (username, email, password) \
-      \  VALUES (?, ?, crypt(?, gen_salt('bf', 8)))\
-      \  RETURNING id;"
 
-verifyAuthentication :: AuthenticationData -> PGQuery (Maybe PersonId)
-verifyAuthentication auth = PGQuery $ \conn -> do
-  let
-    email = _authEmail auth
-    password = _authPassword auth
+    doesPersonExistQuery :: ArangoRequest [Person]
+    doesPersonExistQuery = query $ def
+      { arQuery = "FOR p IN Auth FILTER p.email == @email RETURN p"
+      , arBindVars = object
+                   [ "email" .= toJSON (_registrationEmail reg) ]
+      }
 
-  mAuthenticated <- query conn sql (email, password)
-  pure $
-    case mAuthenticated of
-      [] -> Nothing
-      personId:_ -> Just personId
+    createPersonQuery :: ArangoRequest [PersonId]
+    createPersonQuery = query $ def 
+      { arQuery = "INSERT @person IN People RETURN NEW._id"
+      , arBindVars =
+          object
+          [ "person" .= toJSON $ NewPerson
+            { _personUsername = _registrationUsername reg
+            , _personEmail    = _registrationEmail reg
+            , _personPassword = passwordHash
+            , _personCreated  = now
+            }
+          ]
+      }
+
+
+verifyLogin :: Login -> ArangoConfig -> IO (Maybe PersonId)
+verifyLogin login config = do
+  mAuth <- run config findByEmail
+  case mAuth of
+    [] -> pure Nothing
+    auth:_ -> do
+      let password = _loginPassword login
+          hashedPassword = _authPassword auth
+
+      if True == BCrypt.validatePassword password hashedPassword
+        then pure $ Just (_authId auth)
+        else pure Nothing
   where
-    sql =
-      "SELECT id \
-      \  FROM person \
-      \  WHERE email = ? \
-      \  AND password = crypt(?, password);"
+    findByEmail :: ArangoRequest [Authentication]
+    findByEmail = query $ def
+      { arQuery = "FOR p IN People FILTER p.email == @email RETURN p"
+      , arBindVars = object [ "email" .= toJSON (_loginEmail login) ]
+      }
 
-getGamesForPersonId :: PersonId -> PGQuery [Game]
-getGamesForPersonId personId = PGQuery $ \conn ->
-  query conn sql (Only personId)
+
+getGamesForPersonId :: PersonId -> ArangoConfig -> IO [Game]
+getGamesForPersonId personId config = do
+  games <- run config getGames
   where
-    sql =
-      "SELECT game.id, game.title \
-      \  FROM person_game_relation as rel \
-      \  INNER JOIN game \
-      \  ON game.id = rel.game_id \
-      \  WHERE rel.person_id = ? \
-      \  ORDER BY game.created_at ASC;"
+    getGames :: ArangoRequest [Game]
+    getGames = query $ def
+      { arQuery = "RETURN DOCUMENT(Games, RETURN DOCUMENT(@personId).games)"
+      , arBindVars = object [ "personId" .= toJSON personId ]
+      }    
 
-createGameForPersonId :: PersonId -> NewGame -> PGQuery GameId
-createGameForPersonId personId newGame = PGQuery $ \conn -> do
+createGameForPersonId :: PersonId -> NewGame -> ArangoConfig -> IO GameId
+createGameForPersonId personId newGame config = do
+  games <- run config createGame
+  where
+    createGame :: ArangoRequest [GameId]
+    createGame = query $ def
+      { arQuery = "RETURN DOCUMENT(Games, RETURN DOCUMENT(@personId).games)"
+      , arBindVars =
+          object
+          [ "personId" .= toJSON personId
+          , "newGame"
+          ]
+      }    
+
   [gameId] <- query conn sql
               ( _newGameTitle newGame
               , _newGameType newGame
@@ -214,7 +249,7 @@ insertChatMessage personId gameId message = PGQuery $ \conn -> do
       query conn (sql "body")
         (personId, gameId, ChatMessageType, body)
 
-    NewDiceRollMessage diceResult ->
+    NewDiceRoll diceResult ->
       query conn (sql "dice_result")
         (personId, gameId, DiceRollMessageType, diceResult)
 
@@ -321,3 +356,15 @@ updateGameTitle gameId title = PGQuery $ \conn -> do
       \  SET title = ? \
       \  WHERE id = ? \
       \  RETURNING true;"
+
+
+-- BCrypt.hashPassword 12 password
+-- BCrypt.validatePassword password hashedPassword
+
+-- genUUID conn = do
+--   uuid <- UUID.nextRandom
+--   exists <- runRedis conn $ do
+--     hexists ("game:" <> BS8.pack (show uuid)) "title"
+--   case exists of
+--     Right True -> genUUID conn
+--     _ -> pure uuid

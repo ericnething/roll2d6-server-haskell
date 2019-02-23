@@ -1,0 +1,32 @@
+packages: ./*.cabal
+
+source-repository-package
+    type: git
+    location: https://github.com/tathougies/beam
+    tag: f89063ddde0b2c6f1383fd2056fece84a0f96a70
+    subdir: beam-core
+
+source-repository-package
+    type: git
+    location: https://github.com/tathougies/beam
+    tag: f89063ddde0b2c6f1383fd2056fece84a0f96a70
+    subdir: beam-migrate
+
+source-repository-package
+    type: git
+    location: https://github.com/tathougies/beam
+    tag: f89063ddde0b2c6f1383fd2056fece84a0f96a70
+    subdir: beam-postgres
+
+source-repository-package
+    type: git
+    location: https://github.com/tathougies/beam
+    tag: f89063ddde0b2c6f1383fd2056fece84a0f96a70
+    subdir: beam-sqlite
+
+source-repository-package
+    type: git
+    location: https://github.com/tathougies/beam
+    tag: f89063ddde0b2c6f1383fd2056fece84a0f96a70
+    subdir: beam-migrate-cli
+

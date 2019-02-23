@@ -20,42 +20,57 @@
 
 {-# LANGUAGE OverloadedStrings #-}
 
-module CouchDB
-  ( createDatabase )
+module Arango
+  ( )
 where
 
+import qualified Data.Aeson as Aeson
 import Data.Aeson
+  ( Value
+  , (.=)
+  )
 import Data.Default.Class
+import Network.HTTP.Client
+  ( Manager
+  , newManager
+  , defaultManagerSettings
+  )
 import Network.HTTP.Req
-import Types (GameId, NewGame)
-import qualified Data.Text as T (pack)
+import qualified Data.Text as T
+import           Data.Text (Text)
 import qualified Data.ByteString.Lazy as LBS (ByteString)
 
-couchDomain = "localhost"
-couchPort = 5984
+data Context = Context
+  { contextManager :: Manager
+    ,
+  }
 
-createDatabase :: GameId -> NewGame -> IO (Maybe ())
-createDatabase gameId newGame =
-  runReq def $ do
-  r <- req PUT
-    (http couchDomain /: T.pack (show gameId))
-    NoReqBody
-    ignoreResponse
-    (port couchPort)
-  case responseStatusCode r of
-    201 -> populateDatabase gameId newGame
-    _   -> pure Nothing
+toQuery :: Text -> Encoding -> Encoding
+toQuery q bindVars = Aeson.encodingToLazyByteString
+  Aeson.pairs
+  ( "query" .= q <>
+    "bindVars" .= bindVars
+  )
 
-populateDatabase :: GameId -> NewGame -> IO (Maybe ())
-populateDatabase gameId newGame =
+data Connection = Connection
+  { _connectionHost :: Text
+  , _connectionPort :: Int
+  }
+
+newtype ArangoM a = ArangoM { unArangoM :: Connection -> IO a }
+  deriving (Functor, Applicative, Monad) via (ReaderT Connection IO)
+
+
+runArango :: ArangoQuery -> IO a
+runArango q =
   runReq def $ do
   r <- req POST
-       (http couchDomain /: T.pack (show gameId))
+       (http "localhost")
        (ReqBodyLbs (encode newGame))
-       ignoreResponse
-       (port couchPort
-         <> header "Content-Type" "application/json")
-  case responseStatusCode r of
-    201 -> pure $ Just ()
-    _ -> pure Nothing
-
+       jsonResponse
+       (port "8529" <>
+        header "Content-Type" "application/json")
+  pure $
+    case responseStatusCode r of
+      201 -> pure $ Just ()
+      _ -> pure Nothing

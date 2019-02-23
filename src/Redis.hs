@@ -36,8 +36,10 @@ module Redis
   )
 where
 
+import qualified Data.Aeson as JSON (encode, decode)
+import Data.Maybe (catMaybes)
 import Data.Monoid ((<>))
-import Control.Monad (when)
+import Control.Monad (when, forM)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader.Class (MonadReader, asks)
 import Control.Monad.Trans.Reader (ReaderT(..))
@@ -46,13 +48,12 @@ import qualified Data.ByteString.Char8 as BS8
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text.Encoding as T (encodeUtf8, decodeUtf8)
+import qualified Data.Text as T (pack)
+
+import Data.Time.Clock (getCurrentTime)
 
 import Database.Redis
 import Types
-  ( PersonId(..)
-  , GameId(..)
-  , InviteCode(..)
-  )
 import Config (Config(..))
 
 newtype RedisQuery a = RedisQuery
@@ -119,6 +120,8 @@ createInvite (GameId gameId) inviteId exp = RedisQuery $ \conn -> do
     expire inviteId exp
   pure ()
 
-lookupGameInvite :: InviteCode -> RedisQuery (Either Reply (Maybe ByteString))
+lookupGameInvite :: InviteCode
+                 -> RedisQuery (Either Reply (Maybe ByteString))
 lookupGameInvite (InviteCode inviteId) = RedisQuery $ \conn -> do
   runRedis conn (get ("invite:" <> T.encodeUtf8 inviteId))
+
